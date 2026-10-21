@@ -1,0 +1,10 @@
+# Mapping's ROS 1 -> ROS 2 bridge is intentionally telemetry-only.
+# It is loaded only while the project mapping stack is active and must never
+# include a command topic or alter the vendor manual-control path.
+topics:
+  - topic: /leg_odom2
+    type: nav_msgs/msg/Odometry
+    queue_size: 10
+    qos:
+      reliability: reliable
+      durability: volatile

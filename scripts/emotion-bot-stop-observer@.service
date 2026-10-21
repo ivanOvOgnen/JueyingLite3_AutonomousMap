@@ -1,0 +1,22 @@
+[Unit]
+Description=EmotionBot passive Retroid and vendor STOP observer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/bin/python3 /opt/emotion-bot-motion/motion_stop_observer.py
+Restart=on-failure
+RestartSec=2
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# The observer must read the vendor deeprcs log, but never write to /home.
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX AF_INET AF_PACKET
+
+[Install]
+WantedBy=multi-user.target

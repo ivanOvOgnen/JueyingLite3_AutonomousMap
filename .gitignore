@@ -1,0 +1,20 @@
+
+# ROS build products
+build/
+install/
+log/
+**/__pycache__/
+*.py[cod]
+
+# Runtime credentials and logs
+.env
+.env.*
+!.env.example
+*token*
+*.log
+
+# Local editors and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

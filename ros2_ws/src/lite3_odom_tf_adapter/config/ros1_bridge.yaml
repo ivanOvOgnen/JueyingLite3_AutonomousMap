@@ -1,0 +1,16 @@
+# Combined project-owned ROS 1 <-> ROS 2 bridge.
+# Keep this as the single /topics parameter so the odometry bridge is not
+# replaced when the guarded vendor command path is commissioned.
+topics:
+  - topic: /leg_odom2
+    type: nav_msgs/msg/Odometry
+    queue_size: 10
+    qos:
+      reliability: reliable
+      durability: volatile
+  - topic: /cmd_vel_corrected
+    type: geometry_msgs/msg/Twist
+    queue_size: 1
+    qos:
+      reliability: reliable
+      durability: volatile
