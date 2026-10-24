@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#111827">
     <title>Lite3 Room Mapper</title>
-      <link rel="stylesheet" href="styles.css?v=14">
+      <link rel="stylesheet" href="styles.css?v=15">
   </head>
   <body>
     <header class="topbar">
@@ -20,7 +20,7 @@
           <h1>Map first. Navigate when ready.</h1>
           <p class="subhead">Build a room map under manual RC control. Then start localization and Nav2, click a known-free destination, and submit it to the planner.</p>
         </div>
-        <span class="mode-badge">PLANNER GATED</span>
+        <span class="mode-badge" id="modeBadge">PLANNER GATED</span>
       </section>
 
       <nav class="steps" aria-label="Workflow">
@@ -57,10 +57,10 @@
             <input id="mapYamlInput" type="file" accept=".yaml,.yml,text/yaml,text/plain" hidden>
             <button id="loadMapButton" class="file-button load-button" type="button" disabled>Load map</button>
           </div>
-          <details class="hosted-map">
-            <summary>Or load map files hosted on this laptop</summary>
+          <details class="hosted-map" open>
+            <summary>Saved maps and offline review</summary>
             <div class="hosted-map-fields">
-              <label>Saved map on this laptop
+              <label>Saved map
                 <select id="savedMapPreset" autocomplete="off">
                   <option value="lite3_room">Earlier room scan</option>
                   <option value="lite3_room_scan_20260930">Sep 30 scan (review only)</option>
@@ -69,11 +69,12 @@
               </label>
               <label>Map image URL<input id="hostedImageUrl" type="text" value="/maps/lite3_room.pgm" autocomplete="off" spellcheck="false"></label>
               <label>Map YAML URL<input id="hostedYamlUrl" type="text" value="/maps/lite3_room.yaml" autocomplete="off" spellcheck="false"></label>
-              <button id="loadHostedMapButton" class="file-button secondary" type="button">Load hosted map</button>
+              <button id="loadHostedMapButton" class="file-button secondary" type="button">Load selected map</button>
             </div>
-            <p class="map-instructions">Copy the saved image and matching YAML into <code>webapp/maps/</code> on the computer serving this page. The URLs must start with <code>/maps/</code>.</p>
+            <p class="map-instructions">Robot catalogue maps load as one verified snapshot. Local map files remain available for offline review. A reviewed map supports commissioned navigation; a verified unreviewed map supports only a short attended trial through known-free space.</p>
+            <p class="map-instructions" id="selectedMapReviewStatus" role="status">Select a saved robot map to check its navigation review.</p>
           </details>
-          <p class="map-instructions">Load a saved ROS map image and its matching YAML file. Start localization / Nav2 with a map saved on the robot, then click a known-free point on this map to select a destination and heading. A click previews coordinates; it does not move the robot.</p>
+          <p class="map-instructions">Load a saved ROS map image and its matching YAML file. You can click a target even while localization is uncertain; unknown or occupied cells are marked for inspection only. Check saved-map line gives a passive straight-line inspection. Only a live Nav2 route preview can authorize goal submission. A click does not move the robot.</p>
           <div class="map-viewer-toolbar" aria-label="Map viewer controls">
             <div class="map-legend" aria-label="Occupancy legend"><span><i class="legend-free"></i>Free</span><span><i class="legend-wall"></i>Wall / occupied</span><span><i class="legend-unknown"></i>Unknown</span></div>
             <div class="map-view-actions"><button id="mapZoomOutButton" class="map-view-button" type="button" aria-label="Zoom out">−</button><output id="mapZoomLabel">100%</output><button id="mapZoomInButton" class="map-view-button" type="button" aria-label="Zoom in">+</button><button id="mapResetViewButton" class="map-view-button map-reset-button" type="button">Fit map</button></div>
@@ -88,28 +89,25 @@
             <div><b>Approximate map cells</b><span id="mapCellCounts"></span></div>
             <p id="mapQualityNote">Uses map YAML occupancy thresholds; it does not verify alignment or navigation safety.</p>
           </div>
-          <section class="saved-cloud" aria-label="Saved three-dimensional room reconstruction">
-            <div class="card-heading"><div><p class="eyebrow">SAVED 3D REVIEW</p><h2>Registered room cloud</h2></div><span class="tag" id="savedCloudState">NO CLOUD</span></div>
-            <div class="map-tools"><label class="file-button secondary" for="savedCloudInput">Choose registered PLY</label><input id="savedCloudInput" type="file" accept=".ply,application/octet-stream" hidden><button id="savedCloudReset" class="file-button secondary" type="button" disabled>Fit view</button></div>
-            <div class="saved-cloud-surface"><canvas id="savedCloudCanvas" aria-label="Saved interactive three-dimensional room cloud" hidden></canvas><p id="savedCloudEmpty" class="viewer-empty">Load a timestamp-verified, map-frame registered PLY cloud to inspect it offline.</p></div>
-            <div class="map-footer"><span id="savedCloudMeta">No saved 3D evidence loaded</span><span>Drag to orbit · Shift-drag to pan · wheel to zoom</span></div>
-            <p class="map-instructions">The PLY coordinates must be in this map’s ROS <code>map</code> frame (metres). A live preview or a cloud with unverified timestamps must not be saved here as a reconstruction.</p>
-          </section>
           <div class="goal-preview" id="goalPreview" hidden>
             <div><p class="eyebrow">CLICKED POSITION</p><strong id="goalCoordinates">x: —, y: —</strong></div>
-            <span>Map-frame preview only. Submit the selected point after localization and Nav2 are ready.</span>
+            <span id="clickedPositionHint">Choose whether this point is the robot's current position or a navigation target.</span>
           </div>
           <div class="goal-actions">
             <label class="pose-mode">Map click selects
-              <select id="mapClickMode"><option value="goal">Navigation goal</option><option value="initial">Robot starting pose</option></select>
+              <select id="mapClickMode"><option value="initial">Robot is here</option><option value="goal">Navigation target</option></select>
             </label>
             <label class="pose-mode">Heading (degrees)<input id="initialYaw" type="number" value="0" min="-180" max="180" step="5"></label>
-            <button id="setInitialPoseButton" class="file-button secondary" type="button" disabled>Set robot start pose</button>
+            <button id="setInitialPoseButton" class="file-button secondary" type="button" disabled>Use clicked point as robot location</button>
           </div>
           <div class="goal-actions">
+            <button id="controlLeaseButton" class="file-button secondary" type="button" disabled>Control this session</button>
+            <button id="previewPathButton" class="file-button secondary" type="button" disabled>Preview route</button>
+            <button id="armMotionButton" class="file-button secondary" type="button" disabled>Arm goal motion</button>
             <button id="globalLocalizationButton" class="file-button secondary" type="button" disabled>Locate robot automatically (no start pose)</button>
             <p class="map-instructions" id="globalLocalizationStatus">AMCL searches the saved map using the live scan and odometry. It can be ambiguous in repetitive or incomplete maps; verify the localization estimate before choosing a destination. This does not move the robot.</p>
           </div>
+          <p class="control-readiness" id="goalReadinessStatus" role="status">Load a robot map to see the next step for setting a pose or target.</p>
           <div class="goal-actions">
             <button id="plannerOptInButton" class="file-button secondary" type="button" disabled>Enable planner goal requests</button>
             <button id="sendGoalButton" class="file-button" type="button" disabled>Send selected point to Nav2</button>
@@ -140,7 +138,7 @@
               <div><span>Navigation gate</span><b id="navigationStatus" class="unknown">Not checked</b></div>
               <div><span>Motor output</span><b id="motionOutputStatus" class="unknown">Not checked</b></div>
             </div>
-            <p class="map-instructions">Motor output is intentionally isolated. This dashboard cannot verify the vendor controller link; confirm the Lite3 app is connected and in manual mode.</p>
+            <p class="map-instructions">Motor output depends on the selected bridge profile and live robot checks. Keep the DEEP controller available.</p>
           </article>
           <article class="card mapping-controls">
             <p class="eyebrow">MAPPING CONTROLS</p>
@@ -154,25 +152,30 @@
               <button id="stopMappingButton" class="file-button secondary" type="button" disabled>Stop mapping</button>
             </div>
             <div class="action-buttons">
+              <button id="returnMappingButton" class="file-button secondary" type="button" disabled>Return to mapping mode</button>
+              <button id="prepareTrialButton" class="file-button secondary" type="button" disabled>Prepare supervised walking trial</button>
               <button id="startNavigationButton" class="file-button" type="button" disabled>Start localization / Nav2</button>
               <button id="stopNavigationButton" class="file-button secondary" type="button" disabled>Stop localization / Nav2</button>
             </div>
+            <p class="control-readiness" id="mappingReadinessStatus" role="status">Checking the robot and saved maps…</p>
             <button id="stopAutonomyButton" class="file-button shutdown-button" type="button" disabled>STOP AUTONOMY</button>
             <p class="map-instructions" id="safetyStopStatus">Software stop cancels a planner goal, disables the project gate, and stops Nav2. It is not a physical emergency stop. Keep the vendor controller or hardware stop ready; this UI cannot verify that it will stop the robot.</p>
-            <p class="map-instructions">Workflow: save a map on the robot, start localization / Nav2, set the robot's starting pose on the map, click a known-free destination, then submit it to the planner. Depth obstacle avoidance only works when the live sensor costmap is ready. Planner requests stay opt-in and the velocity output is isolated from the dog.</p>
+            <p class="map-instructions">For a supervised walking trial: latch project STOP, prepare trial mode, start localization/Nav2, verify the robot marker, preview a known-free destination within 0.5 m, submit the goal, then explicitly arm for at most 10 seconds. Keep the vendor app STOP within reach. After the trial, press STOP AUTONOMY, close the one-shot laptop session, and verify the DEEP joystick works in Manual + Move.</p>
             <label class="save-map-label">Save current map<input id="saveMapName" type="text" maxlength="64" autocomplete="off" spellcheck="false"></label>
-            <button id="saveMapButton" class="file-button secondary" type="button" disabled>Save map to robot</button>
+            <button id="finishScanButton" class="file-button secondary" type="button" disabled>Finish scan and save</button>
+            <button id="saveMapButton" class="file-button secondary" type="button" disabled>Save live map snapshot</button>
+            <p class="map-instructions" id="mapSaveStatus" role="status">Start mapping and wait for a live map, then finish the scan while the robot is stationary.</p>
             <p class="map-instructions" id="apiActionStatus">Robot mapping API not connected.</p>
           </article>
           <article class="card guidance-card">
-            <p class="eyebrow">MAPPING CHECKLIST</p>
-            <h2>Guide with the RC</h2>
+            <p class="eyebrow">DOABLE FLOWS</p>
+            <h2>Map, locate, then preview</h2>
             <ol>
-              <li>Keep the RC controller in manual mode.</li>
-              <li>Walk slowly and cover the room and doorways.</li>
-              <li>Return near the starting point, then save the map.</li>
+              <li>In Manual + Move, start mapping, guide one slow loop with the DEEP controller, then finish and save the 2D map.</li>
+              <li>Select the saved robot map, start localization/Nav2, load that map, and click the robot's actual position to seed AMCL.</li>
+              <li>With stable localization, click a known-free target, acquire session control, preview its route, enable goal requests, and submit. An unreviewed map permits only a 0.5 m supervised trial with separate arming.</li>
             </ol>
-            <div class="notice">Mapping observes the room; it does not drive the robot.</div>
+            <div class="notice">A map click alone never moves the robot. The page shows the next unmet prerequisite beside disabled controls.</div>
           </article>
           <article class="card diagnostics-card">
             <p class="eyebrow">ROBOT DIAGNOSTICS</p>
@@ -191,8 +194,8 @@
           </article>
         </aside>
       </section>
-      <p class="footnote">SLAM mapping is user-guided · map clicks select Nav2 destinations · planner requests require explicit opt-in · motor output remains isolated</p>
+      <p class="footnote">SLAM mapping is user-guided · map clicks preview coordinates · target walking requires a known-free route, live localization, route preview, and explicit supervised motion</p>
     </main>
-    <script src="app.js?v=25"></script>
+    <script src="app.js?v=30.4"></script>
   </body>
 </html>

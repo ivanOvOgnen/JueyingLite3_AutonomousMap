@@ -10,6 +10,7 @@ than the known-invalid raw PointCloud2 clock.
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -28,6 +29,17 @@ from tf2_msgs.msg import TFMessage
 
 
 FORMAT = 'lite3_mapping_capture/v1'
+
+
+def json_safe(value):
+    """Preserve non-finite sensor values as explicit strings in strict JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return 'NaN' if math.isnan(value) else ('Infinity' if value > 0 else '-Infinity')
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return value
 
 
 def stamp_ns(stamp):
@@ -69,6 +81,9 @@ class MappingRecorder(Node):
         self.events = (self.output / 'events.jsonl').open('x', encoding='utf-8', buffering=1)
         self.max_bytes = max_bytes
         self.saved_bytes = 0
+        self.reserved_bytes = 0
+        self.state_lock = threading.Lock()
+        self.writer_error = None
         self.depth_index = 0
         self.stopping = False
         self.counts = {}
@@ -103,6 +118,7 @@ class MappingRecorder(Node):
             'raw_cloud_header': '/camera/depth/color/points'},
             'notes': ['Reception timestamps are recorder host wall-clock timestamps.',
                       'Message header stamps are preserved verbatim.',
+                      'Non-finite numeric values use JSON strings NaN, Infinity and -Infinity.',
                       'Raw PointCloud2 payload is intentionally not trusted for map registration.']}
         (self.output / 'metadata.json').write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
 
@@ -110,41 +126,60 @@ class MappingRecorder(Node):
         with self.event_lock:
             self.counts[kind] = self.counts.get(kind, 0) + 1
             row = {'kind': kind, 'received_unix_ns': time.time_ns(), **payload}
-            self.events.write(json.dumps(row, separators=(',', ':')) + '\n')
+            self.events.write(json.dumps(json_safe(row), separators=(',', ':'), allow_nan=False) + '\n')
 
     def _header(self, header):
         return {'frame_id': header.frame_id, 'stamp_ns': stamp_ns(header.stamp)}
 
     def _depth(self, message):
+        received = time.time_ns()
         if self.stopping:
             return
         payload = bytes(message.data)
-        if self.saved_bytes + len(payload) > self.max_bytes:
-            self.dropped['depth_disk_limit'] = self.dropped.get('depth_disk_limit', 0) + 1
-            return
+        with self.state_lock:
+            if self.writer_error:
+                self.dropped['depth_writer_failed'] = self.dropped.get('depth_writer_failed', 0) + 1
+                return
+            if self.reserved_bytes + len(payload) > self.max_bytes:
+                self.dropped['depth_disk_limit'] = self.dropped.get('depth_disk_limit', 0) + 1
+                return
+            # Reserve queued and in-progress bytes, not just completed writes.
+            self.reserved_bytes += len(payload)
         index = self.depth_index
         self.depth_index += 1
         item = (index, payload, self._header(message.header), message.width, message.height,
-                message.encoding, message.is_bigendian, message.step)
+                message.encoding, message.is_bigendian, message.step, received)
         try:
             self.depth_queue.put_nowait(item)
         except queue.Full:
-            self.dropped['depth_writer_queue'] = self.dropped.get('depth_writer_queue', 0) + 1
+            with self.state_lock:
+                self.reserved_bytes -= len(payload)
+                self.dropped['depth_writer_queue'] = self.dropped.get('depth_writer_queue', 0) + 1
 
     def _write_depth(self):
         while True:
             item = self.depth_queue.get()
-            if item is None:
+            try:
+                if item is None:
+                    return
+                index, payload, header, width, height, encoding, big_endian, step, received = item
+                filename = f'{index:08d}.bin'
+                path = self.depth_dir / filename
+                with path.open('xb') as output:
+                    output.write(payload)
+                with self.state_lock:
+                    self.saved_bytes += len(payload)
+                self._event('depth', index=index, file=f'depth/{filename}', bytes=len(payload),
+                            sha256=hashlib.sha256(payload).hexdigest(), header=header, width=width,
+                            height=height, encoding=encoding, is_bigendian=bool(big_endian), step=step,
+                            received_unix_ns=received)
+            except Exception as error:
+                with self.state_lock:
+                    self.writer_error = f'{type(error).__name__}: {error}'
+                    self.dropped['depth_write_error'] = self.dropped.get('depth_write_error', 0) + 1
                 return
-            index, payload, header, width, height, encoding, big_endian, step = item
-            filename = f'{index:08d}.bin'
-            path = self.depth_dir / filename
-            with path.open('xb') as output:
-                output.write(payload)
-            self.saved_bytes += len(payload)
-            self._event('depth', index=index, file=f'depth/{filename}', bytes=len(payload),
-                        sha256=hashlib.sha256(payload).hexdigest(), header=header, width=width,
-                        height=height, encoding=encoding, is_bigendian=bool(big_endian), step=step)
+            finally:
+                self.depth_queue.task_done()
 
     def _camera_info(self, msg):
         self._event('camera_info', header=self._header(msg.header), width=msg.width, height=msg.height,
@@ -179,20 +214,39 @@ class MappingRecorder(Node):
 
     def _heartbeat(self):
         free = shutil.disk_usage(self.output).free
-        self._event('heartbeat', counts=dict(self.counts), dropped=dict(self.dropped), queued_depth=self.depth_queue.qsize(),
-                    saved_depth_bytes=self.saved_bytes, free_bytes=free)
+        with self.state_lock:
+            dropped, saved, reserved, error = (dict(self.dropped), self.saved_bytes,
+                                                self.reserved_bytes, self.writer_error)
+        with self.event_lock:
+            counts = dict(self.counts)
+        self._event('heartbeat', counts=counts, dropped=dropped, queued_depth=self.depth_queue.qsize(),
+                    saved_depth_bytes=saved, reserved_depth_bytes=reserved,
+                    writer_error=error, free_bytes=free)
 
     def close(self):
         if self.stopping:
             return
         self.stopping = True
-        self.depth_queue.put(None)
-        self.writer.join(timeout=15)
-        summary = {'format': FORMAT, 'closed_unix_ns': time.time_ns(), 'counts': self.counts,
-                   'dropped': self.dropped, 'saved_depth_bytes': self.saved_bytes,
-                   'writer_finished': not self.writer.is_alive()}
+        deadline = time.monotonic() + 15.0
+        # A full queue plus a dead writer used to block close indefinitely.
+        while self.writer.is_alive() and time.monotonic() < deadline:
+            try:
+                self.depth_queue.put(None, timeout=min(0.1, max(0.001, deadline - time.monotonic())))
+                break
+            except queue.Full:
+                continue
+        self.writer.join(timeout=max(0.0, deadline - time.monotonic()))
+        finished = not self.writer.is_alive()
+        with self.state_lock:
+            summary = {'format': FORMAT, 'closed_unix_ns': time.time_ns(),
+                       'dropped': dict(self.dropped), 'saved_depth_bytes': self.saved_bytes,
+                       'reserved_depth_bytes': self.reserved_bytes, 'writer_error': self.writer_error,
+                       'queued_depth': self.depth_queue.qsize(), 'writer_finished': finished}
+        with self.event_lock:
+            summary['counts'] = dict(self.counts)
         (self.output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
-        self.events.close()
+        if finished:
+            self.events.close()
 
 
 def main(args=None):
@@ -200,8 +254,8 @@ def main(args=None):
     parser.add_argument('output_dir', help='new session directory; it must not already exist')
     parser.add_argument('--max-gib', type=float, default=20.0, help='hard cap for depth payloads (default: 20 GiB)')
     options, ros_args = parser.parse_known_args(args=args)
-    if options.max_gib <= 0:
-        parser.error('--max-gib must be positive')
+    if not math.isfinite(options.max_gib) or options.max_gib <= 0:
+        parser.error('--max-gib must be finite and positive')
     rclpy.init(args=ros_args)
     recorder = MappingRecorder(options.output_dir, int(options.max_gib * 1024 ** 3))
     try:

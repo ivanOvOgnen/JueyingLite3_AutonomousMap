@@ -51,19 +51,18 @@ local_costmap:
       resolution: 0.05
       publish_frequency: 2.0
       always_send_full_costmap: true
-      track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_topic: /map
-        map_subscribe_transient_local: true
-        track_unknown_space: true
+      # Global planning rejects unknown map cells; this rolling window records
+      # current sensor obstacles without inventing a second static map layer.
+      track_unknown_space: false
+      # The rolling odom-frame window must not wait for map->odom at startup.
+      # The global costmap still applies the saved map and its unknown cells.
+      plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
         observation_sources: depth_points
         depth_points:
-          topic: /camera/depth/color/points
+          topic: /perception/depth_obstacles
           sensor_frame: camera_depth_optical_frame
           data_type: "PointCloud2"
           marking: true
@@ -73,7 +72,9 @@ local_costmap:
           obstacle_range: 2.0
           raytrace_range: 2.5
           observation_persistence: 0.0
-          expected_update_rate: 0.15
+          # Measured source gaps exceed 0.15 s; reject a stalled cloud while
+          # allowing the camera pipeline's normal scheduling jitter.
+          expected_update_rate: 0.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.45

@@ -8,7 +8,7 @@ topics:
     qos:
       reliability: reliable
       durability: volatile
-  - topic: /cmd_vel_corrected
+  - topic: /cmd_vel
     type: geometry_msgs/msg/Twist
     queue_size: 1
     qos:

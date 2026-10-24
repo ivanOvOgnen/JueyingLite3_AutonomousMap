@@ -1,5 +1,11 @@
 # Lite3 Project Handover
 
+## Current handover — 2026-10-24
+
+**Map-click movement is still not viable.** The backed-up 18:38 project deployment completed and manual joystick operation was confirmed (`log/nav2_one_shot_20261024_183816.json`), but the next Room Mapper screenshot reports both Nav2 costmaps with invalid source-time freshness/order and depth obstacle acquisition time or map/odom TF not current. No successful physical target walk is recorded. Keep Manual + Move available in the DEEP app. Do not interpret target selection, AMCL convergence, or a Nav2-accepted goal as motor movement.
+
+The robot-side backup for this install is `/home/ysc/lite3_autonomy_ws/backups/20240912/supervised_nav_20240912_072542`; a laptop copy is under `log/nav2_robot_backup_20261024_183816/`. The [step-by-step guide](docs/STEP_BY_STEP_ROBOT_TEST_20261024.md) describes the read-only localization report and manual recovery. The next engineering task is to capture the actual costmap/depth header ages and TF result during the failure, then fix the demonstrated timestamp/TF source. The earlier 2026-10-19 checks below are historical.
+
 ## Latest live checkpoint - 2026-10-19
 
 Reconnect with `scripts/Start-Lite3Session.ps1`; do not reuse the address or tunnel port without rediscovery. In the current session the page is `http://192.168.2.39:18080/`. The saved map `v3_soba_ogi_test2` is loaded, Localization/Nav2 is running, and automatic global localization has converged. The final status showed fresh sensors, all required TF, both costmaps, a ready action server, and `planner_ready=true`; the latest no-write readback had 86 stable AMCL samples near `(1.124, 0.083, -104.8 deg)`.

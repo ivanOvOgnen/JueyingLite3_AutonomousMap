@@ -5,7 +5,8 @@ commissioning component: it publishes only while explicitly enabled, while
 the project readiness heartbeat is fresh, the manual override is clear, and
 the authenticated stop relay record is fresh and clear.  It does not open a
 UDP socket; a separately launched ``ros1_bridge`` parameter bridge carries
-``/cmd_vel_corrected`` to the vendor ROS 1 ``ros2qnx`` subscriber.
+``/cmd_vel`` to the vendor ROS 1 ``ros2qnx`` subscriber. The vendor's
+``/cmd_vel_corrected`` topic is already published by ``/safety_node``.
 """
 
 import math
@@ -18,13 +19,14 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool
+from lite3_odom_tf_adapter.command_permission import CommandPermission
 
 
-class VendorCmdVelBridge(Node):
+class VendorCmdVelBridge(CommandPermission, Node):
     def __init__(self):
         super().__init__('lite3_vendor_cmd_vel_bridge')
         self.declare_parameter('input_topic', '/autonomy/cmd_vel_arbited')
-        self.declare_parameter('output_topic', '/cmd_vel_corrected')
+        self.declare_parameter('output_topic', '/cmd_vel')
         self.declare_parameter('readiness_topic', '/autonomy/ready')
         self.declare_parameter('manual_override_topic', '/autonomy/manual_override')
         self.declare_parameter('enable_service', '/autonomy/vendor_bridge/set_enabled')
@@ -33,6 +35,7 @@ class VendorCmdVelBridge(Node):
         self.declare_parameter('safety_record_timeout', 1.0)
         self.declare_parameter('command_timeout', 0.25)
         self.declare_parameter('readiness_timeout', 1.0)
+        self.declare_parameter('manual_override_timeout', 1.0)
         self.declare_parameter('max_linear_x', 0.10)
         self.declare_parameter('max_angular_z', 0.20)
 
@@ -46,14 +49,18 @@ class VendorCmdVelBridge(Node):
         self._safety_timeout = float(self.get_parameter('safety_record_timeout').value)
         self._command_timeout = float(self.get_parameter('command_timeout').value)
         self._readiness_timeout = float(self.get_parameter('readiness_timeout').value)
+        self._manual_override_timeout = float(self.get_parameter('manual_override_timeout').value)
         self._max_linear_x = abs(float(self.get_parameter('max_linear_x').value))
         self._max_angular_z = abs(float(self.get_parameter('max_angular_z').value))
 
-        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                          durability=DurabilityPolicy.VOLATILE)
         self._publisher = self.create_publisher(Twist, output_topic, qos)
         self._status_pub = self.create_publisher(String, '/autonomy/vendor_bridge/status', qos)
-        self._command_sub = self.create_subscription(Twist, input_topic, self._on_command, qos)
+        self._command_generation = 0
+        self._command_topic, self._command_qos = input_topic, qos
+        self._command_sub = self.create_subscription(Twist, input_topic,
+                                                     lambda msg: self._guard_command(msg, 0), qos)
         self._ready_sub = self.create_subscription(Bool, readiness_topic, self._on_ready, qos)
         self._manual_sub = self.create_subscription(Bool, manual_topic, self._on_manual, qos)
         self._enable_srv = self.create_service(SetBool, enable_service, self._set_enabled)
@@ -61,10 +68,11 @@ class VendorCmdVelBridge(Node):
 
         self._enabled = False
         self._ready = False
-        self._manual_override = False
+        self._manual_override = True
+        self._manual_override_at = None
         self._ready_at = 0.0
         self._last_command_at = 0.0
-        self._zero_sent = False
+        self._init_permission('relay', self._status_pub)
         self._publish_status('disabled: vendor command bridge is off')
         self.get_logger().warning(
             f'Fail-closed vendor bridge: {input_topic} -> {output_topic}; disabled by default')
@@ -74,9 +82,7 @@ class VendorCmdVelBridge(Node):
         return Twist()
 
     def _publish_status(self, text):
-        message = String()
-        message.data = text
-        self._status_pub.publish(message)
+        self._emit_status(text)
 
     def _safety_ok(self):
         header = struct.Struct('<4sIQQI')
@@ -111,9 +117,9 @@ class VendorCmdVelBridge(Node):
         return True, 'fresh stop relay record is clear'
 
     def _disable(self, reason):
+        self._command_generation += 1
         was_enabled = self._enabled
         self._enabled = False
-        self._zero_sent = False
         self._publisher.publish(self._zero())
         if was_enabled:
             self.get_logger().error(reason)
@@ -127,14 +133,23 @@ class VendorCmdVelBridge(Node):
 
     def _on_manual(self, message):
         self._manual_override = bool(message.data)
+        self._manual_override_at = time.monotonic()
         if self._manual_override and self._enabled:
             self._disable('manual override is active')
+
+    def _manual_state_fresh(self, now):
+        return self._manual_override_at is not None and (
+            0.0 <= now - self._manual_override_at <= self._manual_override_timeout)
 
     def _set_enabled(self, request, response):
         if not request.data:
             self._disable('disabled by service request')
             response.success = True
             response.message = 'Vendor bridge disabled; zero command sent.'
+            return response
+        if not self._ownership_valid():
+            response.success = False
+            response.message = 'Exclusive ownership permission is missing or stale.'
             return response
         if not self._physical_stop_verified:
             response.success = False
@@ -145,23 +160,24 @@ class VendorCmdVelBridge(Node):
             response.success = False
             response.message = f'Refusing vendor bridge: {detail}.'
             return response
-        if self._manual_override:
+        if self._manual_override or not self._manual_state_fresh(time.monotonic()):
             response.success = False
-            response.message = 'Refusing vendor bridge: manual override is active.'
+            response.message = 'Refusing vendor bridge: manual state is active, missing, or stale.'
             return response
         if not self._ready or time.monotonic() - self._ready_at > self._readiness_timeout:
             response.success = False
             response.message = 'Refusing vendor bridge: project readiness is false or stale.'
             return response
+        self._renew_command_generation()
         self._enabled = True
         self._last_command_at = time.monotonic()
-        self._zero_sent = False
         self._publish_status('enabled: guarded vendor command bridge')
         response.success = True
         response.message = 'Vendor command bridge enabled.'
         return response
 
     def _on_command(self, message):
+        self._watchdog_tick()
         if not self._enabled:
             return
         values = (message.linear.x, message.linear.y, message.linear.z,
@@ -174,24 +190,23 @@ class VendorCmdVelBridge(Node):
         bounded.angular.z = max(-self._max_angular_z, min(self._max_angular_z, message.angular.z))
         self._publisher.publish(bounded)
         self._last_command_at = time.monotonic()
-        self._zero_sent = False
 
     def _watchdog_tick(self):
         if not self._enabled:
             return
         safety_ok, detail = self._safety_ok()
+        if not self._ownership_valid():
+            self._disable('Exclusive ownership permission expired')
+            return
         now = time.monotonic()
         if not safety_ok:
             self._disable(detail)
-        elif self._manual_override:
-            self._disable('manual override is active')
+        elif self._manual_override or not self._manual_state_fresh(now):
+            self._disable('manual state is active, missing, or stale')
         elif not self._ready or now - self._ready_at > self._readiness_timeout:
             self._disable('project readiness became stale')
         elif now - self._last_command_at > self._command_timeout:
-            self._publisher.publish(self._zero())
-            if not self._zero_sent:
-                self._publish_status('enabled: command heartbeat stale; zero sent')
-                self._zero_sent = True
+            self._disable('command heartbeat stale; explicit re-arm required')
 
 
 def main(args=None):

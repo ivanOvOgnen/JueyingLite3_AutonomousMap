@@ -6,6 +6,8 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     return LaunchDescription([
+        Node(package='lite3_odom_tf_adapter', executable='depth_obstacle_cloud',
+             name='lite3_depth_obstacle_cloud', output='screen'),
         Node(
             package='tf2_ros', executable='static_transform_publisher',
             name='base_to_camera_transform',

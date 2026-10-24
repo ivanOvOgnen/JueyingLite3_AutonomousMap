@@ -1,5 +1,7 @@
 # Lite3 Room Mapper
 
+For the current supervised trial and exact button order, see the [2026-10-24 robot test guide](../docs/STEP_BY_STEP_ROBOT_TEST_20261024.md). The current page allows a target to be selected and inspected before readiness is complete. Sending and arming a physical trial still require current local/global costmaps, timestamp-validated depth observations, matching localization, and a nearby reviewed route. After the 18:38 robot deployment, both costmap source timestamps and depth acquisition time/TF still failed. **Physical map-click movement is currently blocked**; a green target marker alone does not confirm a motion path.
+
 The browser app has two modes:
 
 - **Laptop preview:** run a static web server from this directory. It loads local or hosted PGM/PNG + YAML maps and previews clicked map coordinates. Mapping controls remain disabled because there is no robot API at this origin.

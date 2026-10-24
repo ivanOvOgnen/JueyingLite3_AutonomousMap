@@ -24,12 +24,4 @@ source "$workspace/install/setup.bash"
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 cd "$workspace"
 
-# Keep the project-owned command relay present after reboot, but always in its
-# fail-closed disabled state.  It publishes no motion unless separately
-# commissioned with the independent-stop and arbitration checks satisfied.
-if [[ -x "$workspace/scripts/start_vendor_cmd_vel_bridge.sh" ]]; then
-  "$workspace/scripts/start_vendor_cmd_vel_bridge.sh" || \
-    echo "Warning: guarded vendor command relay was not started; motion remains isolated." >&2
-fi
-
 exec ros2 run lite3_odom_tf_adapter robot_api

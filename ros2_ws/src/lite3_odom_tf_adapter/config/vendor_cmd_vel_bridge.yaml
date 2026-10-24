@@ -1,4 +1,4 @@
-# Loaded by ros1_bridge only when the explicitly commissioned bridge launch is used.
+# Loaded by ros1_bridge for commissioned motion or an explicitly selected supervised trial.
 # Keep the odometry mapping in this file too: ros1_bridge reads one global
 # `/topics` parameter, so a command-only file would remove `/leg_odom2`.
 topics:
@@ -8,7 +8,7 @@ topics:
     qos:
       reliability: reliable
       durability: volatile
-  - topic: /cmd_vel_corrected
+  - topic: /cmd_vel
     type: geometry_msgs/msg/Twist
     queue_size: 1
     qos:

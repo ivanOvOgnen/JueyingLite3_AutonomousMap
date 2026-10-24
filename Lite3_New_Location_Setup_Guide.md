@@ -1,5 +1,7 @@
 # Jueying Lite3 Pro — New Location Connection & Mapping Guide
 
+> **Current Linux laptop procedure (2026-10-24):** Use the [step-by-step robot test guide](docs/STEP_BY_STEP_ROBOT_TEST_20261024.md). The dated v20 addresses, ports, and planner-only statements below describe earlier checkpoints; discover the current robot address from the active network. The supervised trial package has a bounded, separately armed motion path and a backed-up installer. The 18:38 depth/costmap timing repair was deployed, but the next screenshot still showed invalid costmap source timestamps and unavailable depth-obstacle time/TF. Physical map-click movement is not viable.
+
 ## Live session update - 2026-10-18, v20 deployed
 
 API v20 and UI v20 are deployed. The robot API is listening on port 8080 (PID 15939), and the laptop page at `http://192.168.2.39:18082/` serves `app.js?v=20`. A dated rollback copy is at `/home/ysc/lite3_autonomy_ws/backups/20261018/costmap_goaloptin_predeploy_01/`.

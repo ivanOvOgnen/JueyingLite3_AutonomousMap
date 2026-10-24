@@ -18,9 +18,10 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool
+from lite3_odom_tf_adapter.command_permission import CommandPermission
 
 
-class MotionArbiter(Node):
+class MotionArbiter(CommandPermission, Node):
     def __init__(self):
         super().__init__('lite3_motion_arbiter')
         self.declare_parameter('input_topic', '/autonomy/cmd_vel')
@@ -36,6 +37,7 @@ class MotionArbiter(Node):
         self.declare_parameter('safety_record_timeout', 1.0)
         self.declare_parameter('command_timeout', 0.25)
         self.declare_parameter('readiness_timeout', 1.0)
+        self.declare_parameter('manual_override_timeout', 1.0)
         self.declare_parameter('max_linear_x', 0.10)
         self.declare_parameter('max_angular_z', 0.20)
 
@@ -53,17 +55,21 @@ class MotionArbiter(Node):
             self.get_parameter('safety_record_timeout').value)
         self._command_timeout = float(self.get_parameter('command_timeout').value)
         self._readiness_timeout = float(self.get_parameter('readiness_timeout').value)
+        self._manual_override_timeout = float(self.get_parameter('manual_override_timeout').value)
         self._max_linear_x = abs(float(self.get_parameter('max_linear_x').value))
         self._max_angular_z = abs(float(self.get_parameter('max_angular_z').value))
 
         qos = QoSProfile(
-            depth=10,
+            depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.VOLATILE,
         )
         self._publisher = self.create_publisher(Twist, output_topic, qos)
         self._status_publisher = self.create_publisher(String, status_topic, qos)
-        self._command_sub = self.create_subscription(Twist, input_topic, self._on_command, qos)
+        self._command_generation = 0
+        self._command_topic, self._command_qos = input_topic, qos
+        self._command_sub = self.create_subscription(Twist, input_topic,
+                                                     lambda msg: self._guard_command(msg, 0), qos)
         self._ready_sub = self.create_subscription(Bool, readiness_topic, self._on_readiness, qos)
         self._manual_sub = self.create_subscription(
             Bool, manual_override_topic, self._on_manual_override, qos)
@@ -71,12 +77,14 @@ class MotionArbiter(Node):
         self._watchdog = self.create_timer(0.05, self._check_watchdog)
         self._enabled = False
         self._ready = False
-        self._manual_override = False
+        # A missing manual-state source must not be interpreted as clear.
+        self._manual_override = True
+        self._manual_override_at = None
         self._ready_at = 0.0
         self._last_command_at = 0.0
-        self._zero_sent = False
         self._safety_ok = False
         self._safety_detail = 'safety relay record unavailable'
+        self._init_permission('arbiter', self._status_publisher)
         self._publish_status('disabled: output isolated; physical stop verification required')
         self.get_logger().warning(
             f'Fail-closed arbiter: {input_topic} -> {output_topic}; '
@@ -87,9 +95,7 @@ class MotionArbiter(Node):
         return Twist()
 
     def _publish_status(self, text):
-        message = String()
-        message.data = text
-        self._status_publisher.publish(message)
+        self._emit_status(text)
 
     def _read_safety_record(self):
         """Read the authenticated ROS 1 STOP relay's seqlock record.
@@ -139,9 +145,9 @@ class MotionArbiter(Node):
         self._safety_ok, self._safety_detail = self._read_safety_record()
 
     def _disable(self, reason):
+        self._command_generation += 1
         was_enabled = self._enabled
         self._enabled = False
-        self._zero_sent = False
         self._publisher.publish(self._zero())
         if was_enabled:
             self.get_logger().error(reason)
@@ -155,14 +161,23 @@ class MotionArbiter(Node):
 
     def _on_manual_override(self, message):
         self._manual_override = bool(message.data)
+        self._manual_override_at = time.monotonic()
         if self._manual_override and self._enabled:
             self._disable('manual override requested')
+
+    def _manual_state_fresh(self, now):
+        return self._manual_override_at is not None and (
+            0.0 <= now - self._manual_override_at <= self._manual_override_timeout)
 
     def _set_enabled(self, request, response):
         if not request.data:
             self._disable('disabled by service request')
             response.success = True
             response.message = 'Motion arbiter disabled; isolated zero command sent.'
+            return response
+        if not self._ownership_valid():
+            response.success = False
+            response.message = 'Exclusive ownership permission is missing or stale.'
             return response
         if not self._physical_stop_verified:
             response.success = False
@@ -175,9 +190,9 @@ class MotionArbiter(Node):
             response.message = f'Refusing autonomy: {self._safety_detail}.'
             self._publish_status(f'disabled: {self._safety_detail}')
             return response
-        if self._manual_override:
+        if self._manual_override or not self._manual_state_fresh(time.monotonic()):
             response.success = False
-            response.message = 'Refusing autonomy: manual override is active.'
+            response.message = 'Refusing autonomy: manual state is active, missing, or stale.'
             return response
         ready_fresh = self._ready and (
             time.monotonic() - self._ready_at <= self._readiness_timeout)
@@ -185,15 +200,16 @@ class MotionArbiter(Node):
             response.success = False
             response.message = 'Refusing autonomy: project readiness is false or stale.'
             return response
+        self._renew_command_generation()
         self._enabled = True
         self._last_command_at = time.monotonic()
-        self._zero_sent = False
         self._publish_status('enabled: isolated arbiter output; vendor bridge absent')
         response.success = True
         response.message = 'Arbiter enabled on isolated output; vendor bridge remains disconnected.'
         return response
 
     def _on_command(self, message):
+        self._check_watchdog()
         if not self._enabled:
             return
         values = (
@@ -208,24 +224,23 @@ class MotionArbiter(Node):
         bounded.angular.z = max(-self._max_angular_z, min(self._max_angular_z, message.angular.z))
         self._publisher.publish(bounded)
         self._last_command_at = time.monotonic()
-        self._zero_sent = False
 
     def _check_watchdog(self):
         self._update_safety()
         if not self._enabled:
             return
+        if not self._ownership_valid():
+            self._disable('Exclusive ownership permission expired')
+            return
         now = time.monotonic()
         if not self._safety_ok:
             self._disable(self._safety_detail)
-        elif self._manual_override:
-            self._disable('manual override is active')
+        elif self._manual_override or not self._manual_state_fresh(now):
+            self._disable('manual state is active, missing, or stale')
         elif not self._ready or now - self._ready_at > self._readiness_timeout:
             self._disable('project readiness became stale')
         elif now - self._last_command_at > self._command_timeout:
-            self._publisher.publish(self._zero())
-            if not self._zero_sent:
-                self._publish_status('enabled: command heartbeat stale; zero command sent')
-                self._zero_sent = True
+            self._disable('command heartbeat stale; explicit re-arm required')
 
 
 def main(args=None):

@@ -16,7 +16,8 @@ the absence of a registered cloud explicit. The original PGM/YAML remains the
 authoritative Nav2 map, so older map pairs work unchanged.
 
 A saved room cloud, when one has passed timestamp and map-frame registration
-checks, is stored separately as a binary or ASCII PLY in ROS `map` coordinates
-with metres as units. The web UI can inspect that PLY offline. Do not attach the
-raw RealSense cloud or the live stitched-preview buffer: the current camera
-point-cloud timestamp defect makes either unsuitable as persistent evidence.
+checks, may be stored separately as a binary or ASCII PLY in ROS `map`
+coordinates with metres as units. The Room Mapper no longer has a saved-PLY
+viewer. Do not attach the raw RealSense cloud or the live stitched-preview
+buffer: the current camera point-cloud timestamp defect makes either
+unsuitable as persistent evidence.
