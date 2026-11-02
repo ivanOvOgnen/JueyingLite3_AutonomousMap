@@ -126,6 +126,22 @@ def test_readiness_snapshot_cannot_publish_true_after_stop(api):
     assert all(call.args[0].data is False for call in api._readiness_pub.publish.call_args_list)
 
 
+def test_planner_opt_in_without_an_accepted_goal_never_publishes_motion_ready(api):
+    api.status = Mock(return_value={
+        'components': {'navigation': {'planner_ready': True}},
+    })
+    api.allow_nav2_goal_requests = True
+    api._goal_id = None
+    api._goal_state = 'idle'
+
+    api._publish_readiness()
+
+    assert api._readiness_pub.publish.call_args[0][0].data is False
+    context = api._context_pub.publish.call_args[0][0].data
+    assert '"ready": false' in context
+    assert '"goal_active": false' in context
+
+
 def test_stop_is_still_available_during_api_shutdown(api, api_module):
     api._shutdown_requested = True
     api.stop_navigation = Mock()

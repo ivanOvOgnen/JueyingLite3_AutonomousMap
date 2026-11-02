@@ -85,6 +85,7 @@ topics_to_check = (
     '/autonomy/manual_override', '/autonomy/ready', '/autonomy/context',
     '/autonomy/gate/status', '/autonomy/arbiter/status',
     '/autonomy/vendor_bridge/status', '/autonomy/supervisor/status',
+    '/autonomy/supervised_trial/status',
     '/perception/depth_obstacles',
 )
 rclpy.init()

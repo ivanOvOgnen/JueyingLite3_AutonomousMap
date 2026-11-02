@@ -53,7 +53,9 @@ def api_module(monkeypatch):
     spec.loader.exec_module(module)
     monkeypatch.setattr(module.subprocess, 'Popen', forbidden)
     monkeypatch.setattr(module.subprocess, 'run', forbidden)
-    monkeypatch.setattr(module.os, 'killpg', forbidden)
+    # killpg is POSIX-only; create the test double on Windows as well so the
+    # lifecycle suite can run without weakening the production code.
+    monkeypatch.setattr(module.os, 'killpg', forbidden, raising=False)
     return module
 
 
@@ -163,6 +165,7 @@ def command_nodes(api_module, monkeypatch):
         def __init__(self, _name):
             self.parameters = {}
             self.logger = Mock()
+            self._context = SimpleNamespace(handle=object())
 
         def declare_parameter(self, name, value):
             self.parameters[name] = value
@@ -183,6 +186,7 @@ def command_nodes(api_module, monkeypatch):
             return Mock()
 
         def create_timer(self, *_args):
+            assert hasattr(self._context, 'handle'), 'Node._context was overwritten by application state'
             return Mock()
 
         def get_logger(self):
@@ -202,6 +206,7 @@ def command_nodes(api_module, monkeypatch):
         ('gate', 'cmd_vel_gate', 'CmdVelGate'),
         ('arbiter', 'motion_arbiter', 'MotionArbiter'),
         ('relay', 'vendor_cmd_vel_bridge', 'VendorCmdVelBridge'),
+        ('trial', 'supervised_nav_relay', 'SupervisedNavRelay'),
     ):
         spec = importlib.util.spec_from_file_location(
             '_lite3_' + filename + '_unit_tests', PACKAGE / ('lite3_odom_tf_adapter/' + filename + '.py'))

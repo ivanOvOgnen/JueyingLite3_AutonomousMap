@@ -6,7 +6,7 @@ import time
 
 
 class RuntimeState:
-    def __init__(self, *, clock=time.monotonic, lease_seconds=0.8):
+    def __init__(self, *, clock=time.monotonic, lease_seconds=5.0):
         self.lock = threading.RLock()
         self.clock = clock
         self.epoch = 0
@@ -16,6 +16,7 @@ class RuntimeState:
         self.lease_owner = None
         self.lease_token = None
         self.lease_until = 0.0
+        self.lease_renewed_at = 0.0
 
     def reset(self, reason):
         with self.lock:
@@ -65,6 +66,7 @@ class RuntimeState:
                 # Reacquiring must not rotate a token held by an active goal.
                 return self.lease_token
             self.lease_owner, self.lease_token = owner, secrets.token_urlsafe(32)
+            self.lease_renewed_at = now
             self.lease_until = now + self.lease_seconds
             return self.lease_token
 
@@ -72,7 +74,9 @@ class RuntimeState:
         with self.lock:
             if epoch != self.epoch or not self.valid_lease(owner, token):
                 raise ValueError('Lease is expired, invalid or from another session')
-            self.lease_until = self.clock() + self.lease_seconds
+            now = self.clock()
+            self.lease_renewed_at = now
+            self.lease_until = now + self.lease_seconds
 
     def valid_lease(self, owner=None, token=None):
         with self.lock:
@@ -80,7 +84,24 @@ class RuntimeState:
                         (owner is None or owner == self.lease_owner) and
                         ((owner is None and token is None) or isinstance(token, str) and secrets.compare_digest(token, self.lease_token)))
 
+    def fresh_lease(self, max_age_seconds, owner=None, token=None):
+        """Return whether the lease also has a recent transport heartbeat.
+
+        The operator/UI lease may tolerate a short rendering or tunnel stall,
+        while the physical output path uses a tighter heartbeat age.
+        """
+        with self.lock:
+            now = self.clock()
+            return bool(
+                isinstance(max_age_seconds, (int, float)) and
+                not isinstance(max_age_seconds, bool) and
+                max_age_seconds > 0 and
+                self.valid_lease(owner, token) and
+                0 <= now - self.lease_renewed_at <= max_age_seconds
+            )
+
     def release(self):
         with self.lock:
             self.lease_owner = self.lease_token = None
             self.lease_until = 0.0
+            self.lease_renewed_at = 0.0

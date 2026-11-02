@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Start the robot-hosted web API after boot for Wi-Fi browser access.
+# This file must retain Unix LF endings because it is copied to the robot.
 # Keep Nav2 goal requests disabled at startup. Planner testing requires a
 # separate, deliberate opt-in after the live system has been reviewed.
 set -eo pipefail

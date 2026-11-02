@@ -7,13 +7,22 @@ const acorn = require('acorn');
 
 const html = fs.readFileSync(path.join(__dirname, '../webapp/index.html'), 'utf8');
 const source = fs.readFileSync(path.join(__dirname, '../webapp/app.js'), 'utf8');
+const styles = fs.readFileSync(path.join(__dirname, '../webapp/styles.css'), 'utf8');
 const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]));
 const refs = [...source.matchAll(/getElementById\("([^"]+)"\)/g)].map((match) => match[1]);
 assert.deepStrictEqual(refs.filter((id) => !ids.has(id)), [], 'Every referenced UI element must exist');
 assert.ok(html.includes('id="pointCloudCanvas"'), 'Keep the live 3D viewer');
 assert.ok(!html.includes('savedCloudCanvas') && !source.includes('savedCloudCanvas'), 'Remove only saved PLY review');
+assert.ok(html.includes('1. Control session') && html.includes('5. Arm movement'),
+  'The visible navigation controls must show their required order');
+assert.ok(styles.includes('.map-instructions:not([id])'),
+  'Static help text should stay hidden while live readiness messages remain visible');
 
 const tree = acorn.parse(source, { ecmaVersion: 2022 });
+assert.ok(source.includes('mapCatalog.set(name, { ...mapCatalog.get(name), ...result })'),
+  'A save response must retain map_id so localization can enable immediately');
+assert.ok(source.includes('if (mapCatalogRefreshPromise) return mapCatalogRefreshPromise'),
+  'Concurrent catalogue refresh callers must await the active refresh');
 const functionNode = tree.body.find((node) => node.type === 'FunctionDeclaration' && node.id.name === 'updateControls');
 assert.ok(functionNode);
 const element = () => ({ disabled: false, hidden: false, textContent: '', title: '', removeAttribute(name) { delete this[name]; } });
@@ -57,6 +66,12 @@ assert.strictEqual(context.startMappingButton.disabled, false, 'Fresh camera can
 assert.strictEqual(context.startNavigationButton.disabled, false, 'Legacy map can start localization testing');
 assert.strictEqual(context.previewPathButton.disabled, true, 'Legacy map cannot preview a walking route');
 
+status.components.camera.state = 'not_ready';
+status.components.depth_sensor = { state: 'ready', source: 'pointcloud' };
+sandbox.updateControls(status);
+assert.strictEqual(context.startNavigationButton.disabled, false,
+  'A fresh depth point cloud can start localization without the optional depth image');
+
 status.components.mapping.process_running = true;
 status.components.map = { state: 'ready' };
 sandbox.updateControls(status);
@@ -97,7 +112,7 @@ assert.strictEqual(context.previewPathButton.disabled, false, 'Verified map perm
 context.selectedGoal = { x: 2, y: 1 };
 sandbox.updateControls(status);
 assert.strictEqual(context.previewPathButton.disabled, false, 'Distant target can still be inspected passively');
-assert.strictEqual(context.previewPathButton.textContent, 'Check saved-map line');
+assert.strictEqual(context.previewPathButton.textContent, '2. Check saved-map line');
 assert.strictEqual(context.sendGoalButton.disabled, true, 'Distant supervised target cannot be submitted');
 assert.match(context.goalReadinessStatus.textContent, /within 0.50 m/);
 
@@ -108,7 +123,7 @@ context.previewRoute = null;
 context.selectedGoal = { x: 1.4, y: 1 };
 sandbox.updateControls(status);
 assert.strictEqual(context.previewPathButton.disabled, false, 'Map-only inspection remains available without Nav2 readiness');
-assert.strictEqual(context.previewPathButton.textContent, 'Check saved-map line');
+assert.strictEqual(context.previewPathButton.textContent, '2. Check saved-map line');
 assert.strictEqual(context.sendGoalButton.disabled, true, 'Map-only inspection never permits a robot goal');
 assert.match(context.goalReadinessStatus.textContent, /Click Check saved-map line/);
 context.selectedTargetFree = false;
@@ -140,4 +155,8 @@ assert.strictEqual(context.previewRoute, null, 'Passive line check must never se
 context.loadedPixels.data[(21 * 40 + 18) * 4] = 0;
 assert.match(sandbox.inspectSavedMapLine(), /crosses unknown\/occupied/);
 assert.strictEqual(context.mapOnlyRoute, null);
+assert.ok(source.includes('if (!response.ok) controlLease = null;'),
+  'An authoritative heartbeat rejection must clear the lease');
+assert.ok(source.includes('Transient network/AbortController failure'),
+  'Transient heartbeat failures must be retried');
 console.log('UI wiring and control readiness checks passed');

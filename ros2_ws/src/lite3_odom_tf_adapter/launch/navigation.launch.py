@@ -113,9 +113,20 @@ def _setup(context, *args, **kwargs):
     supervised = context.perform_substitution(LaunchConfiguration('supervised_trial')).lower() == 'true'
     if supervised and commissioned:
         raise RuntimeError('Supervised trial and commissioned motion cannot run together')
-    trial_relay = [Node(package='lite3_odom_tf_adapter', executable='supervised_nav_relay',
-                        name='lite3_supervised_nav_relay', output='screen')] if supervised else []
-    return [perception, gate, arbiter, relay, supervisor, nav2_group] + trial_relay
+    if supervised:
+        # The supervised profile has one and only one possible command path:
+        # /nav2/cmd_vel -> supervised_nav_relay -> /cmd_vel.  Do not even
+        # launch the legacy multi-stage commissioned chain here.  Its ROS
+        # endpoints and zero-command side effects must not exist during a
+        # trial, and planner opt-in alone can never arm this relay.
+        trial_relay = Node(
+            package='lite3_odom_tf_adapter',
+            executable='supervised_nav_relay',
+            name='lite3_supervised_nav_relay',
+            output='screen',
+        )
+        return [perception, nav2_group, trial_relay]
+    return [perception, gate, arbiter, relay, supervisor, nav2_group]
 
 
 def generate_launch_description():

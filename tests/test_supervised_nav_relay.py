@@ -6,6 +6,7 @@ import struct
 import sys
 import time
 from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock
 
 
 PATH = (Path(__file__).resolve().parents[1] /
@@ -54,3 +55,29 @@ def test_trial_rejects_stale_or_stopped_vendor_observation(monkeypatch, tmp_path
     path.write_bytes(struct.pack('<4sIQQI', b'EBL3', 1, 6,
                                  time.monotonic_ns()-1_000_000_000, len(payload)) + payload)
     assert not relay.safety_clear(path)
+
+
+def test_never_armed_relay_is_silent_when_disabled(monkeypatch):
+    relay = load(monkeypatch)
+    node = relay.SupervisedNavRelay.__new__(relay.SupervisedNavRelay)
+    node._publisher = Mock()
+    node._output_active = False
+    node._armed_until = 0.0
+    node._goal_id = None
+
+    node._disarm('Disabled before first arm')
+
+    node._publisher.publish.assert_not_called()
+
+
+def test_armed_relay_sends_one_zero_when_disabled(monkeypatch):
+    relay = load(monkeypatch)
+    node = relay.SupervisedNavRelay.__new__(relay.SupervisedNavRelay)
+    node._publisher = Mock()
+    node._output_active = True
+    node._armed_until = time.monotonic() + 1.0
+    node._goal_id = 'goal'
+
+    node._disarm('Trial complete')
+
+    node._publisher.publish.assert_called_once()

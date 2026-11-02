@@ -26,7 +26,7 @@ def test_active_planner_goal_keeps_stationary_amcl_refresh_running(api, api_modu
     api._localization_refresh_client.call_async.return_value=done(None)
     monkeypatch.setattr(api_module, 'Empty', NS(Request=lambda: object()))
     api.status=Mock(return_value={'components': {
-        name: {'state': 'ready'} for name in ('map', 'camera', 'scan', 'odometry')}})
+        name: {'state': 'ready'} for name in ('map', 'depth_sensor', 'scan', 'odometry')}})
 
     api._localization_refresh_tick()
 
@@ -45,7 +45,7 @@ def test_stale_scan_still_stops_amcl_refresh_with_specific_reason(api):
     api._localization_refresh_client=Mock()
     api.status=Mock(return_value={'components': {
         name: {'state': 'not_ready' if name == 'scan' else 'ready'}
-        for name in ('map', 'camera', 'scan', 'odometry')}})
+        for name in ('map', 'depth_sensor', 'scan', 'odometry')}})
 
     api._localization_refresh_tick()
 
@@ -154,6 +154,27 @@ def test_costmap_obstacle_rejects_otherwise_free_map_target(path_api):
     p.api._path_action.send_goal_async.assert_not_called()
 
 
+def test_inflated_costmap_clearance_is_not_applied_twice(path_api):
+    p = path_api
+    costmap = NS(header=p.grid.header, info=p.grid.info, data=list(p.grid.data))
+    # One cell beside, but not at, the target is already marked by Nav2's
+    # inflation layer. The saved map independently enforces the 0.30 m radius.
+    costmap.data[10*40+21] = 100
+    p.api._costmaps['local_costmap'] = costmap
+    response = p.preview()
+    assert response['path_preview']['goal'][:2] == [2.05, 1.05]
+
+
+def test_traversable_inflation_cost_at_target_is_allowed(path_api):
+    p = path_api
+    costmap = NS(header=p.grid.header, info=p.grid.info, data=list(p.grid.data))
+    costmap.data[10*40+20] = 50
+    p.api._costmaps['global_costmap'] = costmap
+    p.api._costmaps['local_costmap'] = costmap
+    response = p.preview()
+    assert response['path_preview']['goal'][:2] == [2.05, 1.05]
+
+
 def test_path_must_start_near_robot_and_end_at_target(path_api):
     p=path_api;p.api._path_action.send_goal_async.return_value=done(p.handle([(3.,3.),(2.05,1.05)]))
     with pytest.raises(p.module.ApiError,match='start near'):p.preview()
@@ -164,6 +185,24 @@ def test_stale_map_and_costmap_callbacks_cannot_update_new_epoch(api):
     api._on_map(object(),epoch=previous)
     api._on_costmap('local_costmap',object(),epoch=previous)
     assert api._map is None and not api._costmaps
+
+
+def test_zero_stamped_foxy_costmap_is_validated_by_receipt(api):
+    grid = NS(header=NS(stamp=NS(sec=0, nanosec=0)),
+              info=NS(width=2, height=2, resolution=.05), data=[0, 0, 0, 0])
+    api._on_costmap('local_costmap', grid, epoch=api._runtime.epoch)
+    assert api._costmap_valid['local_costmap'] is True
+    assert api._costmaps['local_costmap'] is grid
+    assert api._last_rx['local_costmap'] > 0
+    assert 'local_costmap' not in api._runtime.streams
+
+
+def test_depth_pointcloud_can_bootstrap_without_optional_depth_image(api):
+    now = time.monotonic()
+    api._last_rx['pointcloud'] = now
+    depth = api._depth_sensor_component(now)
+    assert depth['state'] == 'ready'
+    assert depth['source'] == 'pointcloud'
 
 
 def test_finish_scan_requires_new_map_from_same_session(api,api_module):
@@ -194,6 +233,7 @@ def test_finish_scan_freezes_saves_then_stops(api,api_module,grid):
     api._on_map(grid,epoch=api._runtime.epoch)
     worker.join(1)
     assert not worker.is_alive() and result['name']=='final'
+    assert result['map_id'] and result['integrity']=='verified'
     assert (api.maps_dir/'final.yaml').is_file()
     api.stop_mapping.assert_called_once()
 
@@ -238,3 +278,9 @@ def test_commands_queued_before_rearm_are_rejected_by_generation(command_nodes):
         node._publisher.publish.assert_not_called()
         node._guard_command(nonzero(command_nodes),node._command_generation)
         assert node._publisher.publish.call_args.args[0].linear.x==.08
+
+
+def test_supervised_trial_relay_preserves_rclpy_context(command_nodes):
+    node = command_nodes.build('trial')
+    assert hasattr(node._context, 'handle')
+    assert node._readiness_context == {}

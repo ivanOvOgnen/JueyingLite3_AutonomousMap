@@ -54,13 +54,16 @@ class SupervisedNavRelay(Node):
         super().__init__('lite3_supervised_nav_relay')
         self._publisher = self.create_publisher(Twist, '/cmd_vel', 1)
         self._status = self.create_publisher(String, '/autonomy/supervised_trial/status', 1)
-        self._context = {}
-        self._context_at = 0.0
+        # Do not use Node._context: rclpy owns that field and its Context
+        # handle is required when timers/services are constructed.
+        self._readiness_context = {}
+        self._readiness_context_at = 0.0
         self._ready = False
         self._ready_at = 0.0
         self._command = Twist()
         self._command_at = 0.0
         self._armed_until = 0.0
+        self._output_active = False
         self._goal_id = None
         self._reason = 'Not armed'
         self.create_subscription(String, '/autonomy/context', self._on_context, 1)
@@ -73,10 +76,10 @@ class SupervisedNavRelay(Node):
         try:
             data = json.loads(message.data)
             if isinstance(data, dict):
-                self._context = data
-                self._context_at = time.monotonic()
+                self._readiness_context = data
+                self._readiness_context_at = time.monotonic()
         except ValueError:
-            self._context = {}
+            self._readiness_context = {}
 
     def _on_ready(self, message):
         self._ready = message.data
@@ -93,10 +96,10 @@ class SupervisedNavRelay(Node):
             response.message = self._reason
             return response
         now = time.monotonic()
-        goal_id = self._context.get('active_goal_id')
+        goal_id = self._readiness_context.get('active_goal_id')
         if self._armed_until > now:
             response.message = 'Trial is already armed; it cannot be extended while active'
-        elif not eligible(self._context, now-self._context_at,
+        elif not eligible(self._readiness_context, now-self._readiness_context_at,
                           self._ready and now-self._ready_at <= CONTEXT_TIMEOUT,
                           safety_clear(), goal_id):
             response.message = 'Goal, lease, readiness, or vendor STOP observation is not current and clear'
@@ -105,23 +108,29 @@ class SupervisedNavRelay(Node):
         else:
             self._goal_id = goal_id
             self._armed_until = now + MAX_ARM_SECONDS
+            self._output_active = True
             self._reason = 'Armed for at most 10 seconds'
             response.success = True
             response.message = self._reason
         return response
 
     def _disarm(self, reason):
+        was_active = self._output_active
         self._armed_until = 0.0
+        self._output_active = False
         self._goal_id = None
         self._reason = reason
-        self._publisher.publish(Twist())
+        # A relay which has never been armed must be completely silent.  Once
+        # it has owned the output, one zero command is required on disarm.
+        if was_active:
+            self._publisher.publish(Twist())
 
     def _tick(self):
         now = time.monotonic()
         if self._armed_until:
             if now >= self._armed_until:
                 self._disarm('Ten-second trial limit reached; re-arm explicitly if needed')
-            elif not eligible(self._context, now-self._context_at,
+            elif not eligible(self._readiness_context, now-self._readiness_context_at,
                               self._ready and now-self._ready_at <= CONTEXT_TIMEOUT,
                               safety_clear(), self._goal_id):
                 self._disarm('Goal, lease, readiness, or vendor STOP observation changed')

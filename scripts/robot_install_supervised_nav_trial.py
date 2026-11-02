@@ -47,6 +47,7 @@ FILES = {
     'index.html': 'webapp/index.html',
     'styles.css': 'webapp/styles.css',
     'start_robot_api.sh': 'scripts/start_robot_api.sh',
+    'robot_preflight.sh': 'scripts/robot_preflight.sh',
 }
 INSTALLED_RESOURCES = {
     **{name: 'share/lite3_odom_tf_adapter/launch/'+name for name in LAUNCH_FILES},
@@ -206,6 +207,35 @@ def wait_api(workspace, old_pid=None, expected_contract=2):
                        'current API PIDs='+str(api_pids(workspace))+'; startup log:\n'+recent)
 
 
+def normalize_shell_launcher(path):
+    """Repair CRLF introduced by a Windows staging checkout."""
+    data = path.read_bytes()
+    normalized = data.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+    if normalized != data:
+        path.write_bytes(normalized)
+    return normalized != data
+
+
+def recover_missing_api(workspace):
+    """Restart only the fail-closed project API after a launcher-EOL failure."""
+    if api_pids(workspace):
+        return status()
+    launcher = workspace/'scripts/start_robot_api.sh'
+    if not launcher.is_file() or launcher.is_symlink() or not inside(launcher, workspace):
+        raise RuntimeError('Cannot recover API: project launcher is missing or unsafe')
+    repaired = normalize_shell_launcher(launcher)
+    output_path = workspace/'logs/supervised_nav_recovery.log'
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open('ab') as output:
+        subprocess.Popen(['/bin/bash', str(launcher)], cwd=workspace,
+                         stdin=subprocess.DEVNULL, stdout=output,
+                         stderr=subprocess.STDOUT, start_new_session=True)
+    fresh = wait_api(workspace, expected_contract=None)
+    print('Recovered stopped project API after normalizing launcher LF endings='
+          +str(repaired)+'. Goal requests remain disabled.', flush=True)
+    return fresh
+
+
 def restart_api(workspace, pid, expected_contract=2):
     os.kill(pid, signal.SIGINT)
     deadline = time.monotonic()+20
@@ -342,6 +372,8 @@ def main():
     parser.add_argument('--stage', type=Path, required=True)
     parser.add_argument('--workspace', type=Path, default=Path.home()/'lite3_autonomy_ws')
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--recover-api', action='store_true',
+                        help='Repair LF endings and restart a missing fail-closed API before preflight')
     args = parser.parse_args()
     stage, workspace = args.stage.resolve(), args.workspace.resolve()
     if not stage.is_dir() or not workspace.is_dir():
@@ -359,6 +391,8 @@ def main():
         raise RuntimeError('Staged UI is not version 30')
     if b'/api/v1/motion/arm-supervised' not in (stage/'robot_api.py').read_bytes():
         raise RuntimeError('Staged API lacks the supervised trial endpoint')
+    if args.recover_api and not api_pids(workspace):
+        recover_missing_api(workspace)
     initial = status()
     check_idle(initial, require_stop=False)
     pids = api_pids(workspace)

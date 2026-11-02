@@ -18,9 +18,9 @@ class DepthObstacleCloud(Node):
     def __init__(self):
         super().__init__('lite3_depth_obstacle_cloud')
         self.declare_parameter('stride', 4)
-        # The vendor depth stream has measured transport latency near 0.75 s.
-        # Keep acquisition timestamps and reject observations older than 1 s.
-        self.declare_parameter('max_source_age', 1.0)
+        # Live probes measure roughly 0.8-1.13 s of camera transport latency.
+        # Preserve acquisition stamps while allowing that bounded envelope.
+        self.declare_parameter('max_source_age', 1.5)
         self.declare_parameter('min_range', 0.15)
         self.declare_parameter('max_range', 3.0)
         self._images, self._infos = OrderedDict(), OrderedDict()
@@ -80,7 +80,7 @@ class DepthObstacleCloud(Node):
         source_age = ((self.get_clock().now().nanoseconds - self._last_stamp) / 1e9
                       if self._last_stamp else None)
         max_source_age = float(self.get_parameter('max_source_age').value)
-        if age is None or age > 0.5:
+        if age is None or age > 0.75:
             detail = (self._health.get('reason') if self._health.get('healthy') is False
                       else 'last valid cloud timed out')
             status.update(healthy=False, reason='No recent valid depth observation: ' + str(detail))

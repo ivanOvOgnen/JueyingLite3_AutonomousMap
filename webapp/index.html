@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#111827">
     <title>Lite3 Room Mapper</title>
-      <link rel="stylesheet" href="styles.css?v=15">
+      <link rel="stylesheet" href="styles.css?v=16">
   </head>
   <body>
     <header class="topbar">
@@ -16,17 +16,15 @@
     <main>
       <section class="intro">
         <div>
-          <p class="eyebrow">ROBOT WORKSPACE</p>
-          <h1>Map first. Navigate when ready.</h1>
-          <p class="subhead">Build a room map under manual RC control. Then start localization and Nav2, click a known-free destination, and submit it to the planner.</p>
+          <h1>Lite3 map &amp; navigation</h1>
         </div>
         <span class="mode-badge" id="modeBadge">PLANNER GATED</span>
       </section>
 
       <nav class="steps" aria-label="Workflow">
-        <div class="step active"><span>1</span><div><b>Build map</b><small>Guide with the RC controller</small></div></div>
-        <div class="step"><span>2</span><div><b>Save map</b><small>Use a map saved on the robot</small></div></div>
-        <div class="step"><span>3</span><div><b>Click a destination</b><small>Localization and Nav2 planner</small></div></div>
+        <div class="step active"><span>1</span><div><b>Map</b></div></div>
+        <div class="step"><span>2</span><div><b>Localize</b></div></div>
+        <div class="step"><span>3</span><div><b>Navigate</b></div></div>
       </nav>
 
       <section class="live-workspace" aria-label="Live mapping views">
@@ -101,16 +99,16 @@
             <button id="setInitialPoseButton" class="file-button secondary" type="button" disabled>Use clicked point as robot location</button>
           </div>
           <div class="goal-actions">
-            <button id="controlLeaseButton" class="file-button secondary" type="button" disabled>Control this session</button>
-            <button id="previewPathButton" class="file-button secondary" type="button" disabled>Preview route</button>
-            <button id="armMotionButton" class="file-button secondary" type="button" disabled>Arm goal motion</button>
+            <button id="controlLeaseButton" class="file-button" type="button" disabled>1. Control session</button>
+            <button id="previewPathButton" class="file-button secondary" type="button" disabled>2. Preview route</button>
             <button id="globalLocalizationButton" class="file-button secondary" type="button" disabled>Locate robot automatically (no start pose)</button>
             <p class="map-instructions" id="globalLocalizationStatus">AMCL searches the saved map using the live scan and odometry. It can be ambiguous in repetitive or incomplete maps; verify the localization estimate before choosing a destination. This does not move the robot.</p>
           </div>
           <p class="control-readiness" id="goalReadinessStatus" role="status">Load a robot map to see the next step for setting a pose or target.</p>
           <div class="goal-actions">
-            <button id="plannerOptInButton" class="file-button secondary" type="button" disabled>Enable planner goal requests</button>
-            <button id="sendGoalButton" class="file-button" type="button" disabled>Send selected point to Nav2</button>
+            <button id="plannerOptInButton" class="file-button secondary" type="button" disabled>3. Enable planner</button>
+            <button id="sendGoalButton" class="file-button" type="button" disabled>4. Send goal</button>
+            <button id="armMotionButton" class="file-button" type="button" disabled>5. Arm movement · 10 s</button>
             <button id="cancelGoalButton" class="file-button secondary" type="button" disabled>Cancel Nav2 goal</button>
             <p id="goalActionStatus" class="map-instructions">Planner goal requests are disabled by default. Enable them only after AMCL, map/pose alignment, transforms, and both fresh costmaps are ready. This does not connect motor output.</p>
           </div>
@@ -128,11 +126,11 @@
               <div><span>Odometry</span><b id="odometryStatus" class="unknown">Not checked</b></div>
               <div><span>Laser scan</span><b id="scanStatus" class="unknown">Not checked</b></div>
               <div><span>2D map</span><b id="mapRobotStatus" class="unknown">Not checked</b></div>
-              <div><span>Depth point cloud</span><b id="pointCloudRobotStatus" class="unknown">Not checked</b></div>
-              <div><span>Stitched point cloud</span><b id="stitchedCloudRobotStatus" class="unknown">Not checked</b></div>
-              <div><span>Mapping</span><b id="mappingStatus" class="unknown">Not checked</b></div>
+              <div class="status-secondary"><span>Depth point cloud</span><b id="pointCloudRobotStatus" class="unknown">Not checked</b></div>
+              <div class="status-secondary"><span>Stitched point cloud</span><b id="stitchedCloudRobotStatus" class="unknown">Not checked</b></div>
+              <div class="status-secondary"><span>Mapping</span><b id="mappingStatus" class="unknown">Not checked</b></div>
               <div><span>Localization</span><b id="localizationStatus" class="unknown">Not checked</b></div>
-              <div><span>Required TF transforms</span><b id="transformsStatus" class="unknown">Not checked</b></div>
+              <div class="status-secondary"><span>Required TF transforms</span><b id="transformsStatus" class="unknown">Not checked</b></div>
               <div><span>Nav2 costmaps</span><b id="costmapsStatus" class="unknown">Not checked</b></div>
               <div><span>Nav2 stack</span><b id="navigationStackStatus" class="unknown">Not checked</b></div>
               <div><span>Navigation gate</span><b id="navigationStatus" class="unknown">Not checked</b></div>
@@ -196,6 +194,6 @@
       </section>
       <p class="footnote">SLAM mapping is user-guided · map clicks preview coordinates · target walking requires a known-free route, live localization, route preview, and explicit supervised motion</p>
     </main>
-    <script src="app.js?v=30.4"></script>
+    <script src="app.js?v=30.7"></script>
   </body>
 </html>

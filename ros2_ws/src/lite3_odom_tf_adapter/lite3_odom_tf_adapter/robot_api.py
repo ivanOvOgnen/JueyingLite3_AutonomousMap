@@ -51,6 +51,9 @@ STALE_AFTER = 2.0
 MAP_STALE_AFTER = 10.0
 LOCALIZATION_STALE_AFTER = 6.0
 LOCALIZATION_MAX_SEARCH_SECONDS = 90.0
+DEPTH_SOURCE_MAX_AGE = 1.5
+DEPTH_RECEIPT_MAX_AGE = 0.75
+MOTION_LEASE_HEARTBEAT_MAX_AGE = 0.8
 MAP_NAME = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 
 
@@ -368,7 +371,10 @@ class RobotApi(Node):
         # Nav2's public `*/costmap` topics are OccupancyGrid. The
         # nav2_msgs/Costmap type is published on the separate `*/costmap_raw`
         # topics; using it here silently prevents a DDS endpoint match.
-        self._observe(name, message, epoch=epoch)
+        # Foxy publishes the public OccupancyGrid costmaps with a zero header
+        # stamp. They are derived state, not acquisition-stamped sensor data,
+        # so readiness must use validated grid shape plus receipt freshness.
+        # Sensor acquisition time is checked independently on scan/depth input.
         info = message.info
         size_x = int(info.width)
         size_y = int(info.height)
@@ -566,7 +572,7 @@ class RobotApi(Node):
                     now - self._localization_refresh_requested_at < interval:
                 return
         components = self.status()['components']
-        stale_inputs = [name for name in ('map', 'camera', 'scan', 'odometry')
+        stale_inputs = [name for name in ('map', 'depth_sensor', 'scan', 'odometry')
                         if components[name]['state'] != 'ready']
         if stale_inputs:
             with self._localization_lock:
@@ -621,17 +627,44 @@ class RobotApi(Node):
             'age_seconds': None if age is None else round(age, 2),
         }
 
+    def _depth_sensor_component(self, now):
+        """Readiness of the depth source actually consumed by mapping/Nav2.
+
+        The project converts the registered depth point cloud into /scan. Some
+        RealSense profiles do not publish depth/image_rect_raw, so that optional
+        image alone must not block a healthy cloud.
+        """
+        pointcloud = self._component('pointcloud', now)
+        camera_image = self._component('camera', now)
+        ready = pointcloud['state'] == 'ready' or camera_image['state'] == 'ready'
+        return {
+            'state': 'ready' if ready else 'not_ready',
+            'source': ('pointcloud' if pointcloud['state'] == 'ready' else
+                       'depth_image' if camera_image['state'] == 'ready' else None),
+            'pointcloud_state': pointcloud['state'],
+            'depth_image_state': camera_image['state'],
+        }
+
     def _publish_readiness(self):
         """Heartbeat consumed by the existing fail-closed command gates.
 
         Readiness never enables a gate itself.  It is true only while the
-        API's existing planner checks pass and an operator has explicitly
-        opted in to planner goals.
+        API's existing planner checks pass, an operator has explicitly
+        opted in, and Nav2 has accepted the tracked goal.  In particular,
+        planner opt-in by itself must never expose a motion heartbeat.
         """
         if (self._runtime.lease_owner is not None and not self._runtime.valid_lease() and
                 not self._autonomy_stop_latched):
             self.stop_autonomy()
         navigation = self.status()['components']['navigation']
+        motion_lease_fresh = self._runtime.fresh_lease(
+            MOTION_LEASE_HEARTBEAT_MAX_AGE)
+        with self._goal_lock:
+            active_goal_id = (
+                self._goal_id
+                if self._goal_state in ('accepted', 'executing')
+                else None
+            )
         message = Bool()
         with self._lock:
             # Serialize publication with priority STOP. A status snapshot taken
@@ -639,12 +672,11 @@ class RobotApi(Node):
             message.data = bool(
                 navigation['planner_ready'] and
                 self.allow_nav2_goal_requests and
-                not self._autonomy_stop_latched and self._runtime.valid_lease())
+                active_goal_id is not None and
+                not self._autonomy_stop_latched and motion_lease_fresh)
             self._readiness_pub.publish(message)
-            with self._goal_lock:
-                active_goal_id = self._goal_id if self._goal_state in ('accepted', 'executing') else None
             context = String()
-            context.data = json.dumps({'ready': message.data, 'operator_lease_valid': self._runtime.valid_lease(),
+            context.data = json.dumps({'ready': message.data, 'operator_lease_valid': motion_lease_fresh,
                                        'map_id': self._navigation_identity, 'software_id': self.software_identity(),
                                        'session_epoch': self._runtime.epoch,
                                        'goal_active': active_goal_id is not None,
@@ -676,6 +708,7 @@ class RobotApi(Node):
                 self._navigation_process.poll() is None)
             components = {k: self._component(k, now) for k in (
                 'camera', 'odometry', 'vendor_odometry', 'scan', 'map', 'pointcloud')}
+            components['depth_sensor'] = self._depth_sensor_component(now)
             localization_age = self._last_rx.get('localization')
             localization_age = (None if localization_age is None else
                                 max(0.0, now - localization_age))
@@ -766,18 +799,16 @@ class RobotApi(Node):
         for key in ('local_costmap', 'global_costmap'):
             stamp = costmap_stamps[key]
             age = None if stamp is None else max(0.0, now - stamp)
-            source = self._runtime.health(key)
-            ready = (costmap_valid[key] and age is not None and age <= STALE_AFTER and
-                     source['state'] == 'ready')
+            ready = costmap_valid[key] and age is not None and age <= STALE_AFTER
             reason = ('No costmap grid received' if stamp is None else
                       'Costmap grid dimensions/data are invalid' if not costmap_valid[key] else
                       'No recent costmap grid received' if age > STALE_AFTER else
-                      'Costmap source timestamp is stale, future, or out of order'
-                      if source['state'] != 'ready' else 'Fresh grid received')
+                      'Fresh grid received')
             costmaps[key] = {
                 'state': 'ready' if ready else 'not_ready',
                 'age_seconds': None if age is None else round(age, 2),
-                'source_age_seconds': source.get('source_age_seconds'),
+                'source_age_seconds': None,
+                'timestamp_semantics': 'receipt freshness; Foxy public costmap stamp may be zero',
                 'reason': reason,
             }
         components['costmaps'] = {
@@ -798,7 +829,7 @@ class RobotApi(Node):
             components['localization']['state'] = 'not_ready'
         localization_ready = components['localization']['state'] == 'ready'
         map_ready = components['map']['state'] == 'ready' and grid is not None
-        sensor_ready = all(components[k]['state'] == 'ready' for k in ('camera', 'odometry', 'scan'))
+        sensor_ready = all(components[k]['state'] == 'ready' for k in ('depth_sensor', 'odometry', 'scan'))
         known_fraction = (
             sum(1 for value in grid.data if value >= 0) / len(grid.data)
             if grid is not None and grid.data else 0.0)
@@ -831,7 +862,7 @@ class RobotApi(Node):
             nav_reason = ('Targets require a verified saved map in supervised trial mode '
                           'or a measured map review in commissioned mode.')
         elif not sensor_ready:
-            missing_sensors = [name for name in ('camera', 'odometry', 'scan')
+            missing_sensors = [name for name in ('depth_sensor', 'odometry', 'scan')
                                if components[name]['state'] != 'ready']
             nav_reason = 'Fresh sensor data required: ' + ', '.join(missing_sensors) + '.'
         elif not localization_ready:
@@ -857,23 +888,38 @@ class RobotApi(Node):
             stages = {key: {**value, 'fresh': now-value['rx'] <= 0.5}
                       for key, value in self._stage_health.items()}
         source_age = (self.get_clock().now().nanoseconds - observation.get('stamp_ns', 0))/1e9
+        receipt_age = now-observation.get('rx', 0)
         observation_ready = (observation.get('healthy') is True and
-                             0 <= now-observation.get('rx', 0) <= 0.5 and -0.05 <= source_age <= 1.0)
+                             0 <= receipt_age <= DEPTH_RECEIPT_MAX_AGE and
+                             -0.05 <= source_age <= DEPTH_SOURCE_MAX_AGE)
         scan_stamp = self._runtime.health('scan').get('stamp_ns')
         scan_frame = self._sensor_frames.get('scan')
         acquisition_tf = bool(scan_stamp and scan_frame and all(
             self._tf_available(target, scan_frame, scan_stamp) for target in ('map', 'odom')))
         depth_stamp = observation.get('stamp_ns')
         depth_frame = observation.get('frame_id')
-        depth_tf = bool(depth_stamp and depth_frame and all(
-            self._tf_available(target, depth_frame, depth_stamp) for target in ('map', 'odom')))
-        observation_ready = observation_ready and acquisition_tf and depth_tf
+        depth_tf_odom = bool(depth_stamp and depth_frame and
+                             self._tf_available('odom', depth_frame, depth_stamp))
+        depth_tf_map = bool(depth_stamp and depth_frame and
+                            self._tf_available('map', depth_frame, depth_stamp))
+        # These historical lookups are diagnostics only. The depth producer
+        # already validates acquisition time and base_link TF before publishing;
+        # AMCL plus the local/global costmap freshness gates verify the active
+        # consumers. Repeating asynchronous historical lookups here made the
+        # planner gate flap despite a continuously healthy pipeline.
         components['transforms']['acquisition_time_scan'] = acquisition_tf
-        components['transforms']['acquisition_time_depth'] = depth_tf
+        components['transforms']['acquisition_time_depth'] = depth_tf_odom
+        components['transforms']['acquisition_time_depth_map_diagnostic'] = depth_tf_map
         components['obstacle_observations'] = {
             'state': 'ready' if observation_ready else 'not_ready',
             'source_age_seconds': source_age if observation.get('stamp_ns') else None,
-            'reason': observation.get('reason', 'No validated depth observations'),
+            'reason': ('Fresh producer-validated depth observation available'
+                       if observation_ready else
+                       observation.get('reason', 'No validated depth observations')
+                       if observation.get('healthy') is not True else
+                       'Depth observation receipt is stale'
+                       if not 0 <= receipt_age <= DEPTH_RECEIPT_MAX_AGE else
+                       'Depth acquisition timestamp is future or stale'),
             'costmap_buffer_acceptance': 'unverified; costmap publication is separate',
         }
         components['command_stages'] = {'state': 'observed' if stages else 'unknown', 'stages': stages}
@@ -884,7 +930,7 @@ class RobotApi(Node):
             self.allow_nav2_goal_requests = False
         if not observation_ready:
             detail = (str(observation.get('reason') or 'no valid depth cloud') if observation.get('healthy') is not True else
-                      'depth acquisition timestamp or map/odom TF is not current')
+                      'depth acquisition or receipt timestamp is not current')
             observation_reason = 'Depth obstacle observations unavailable: ' + detail + '.'
             nav_reason = (observation_reason if base_planner_ready else
                           nav_reason + ' ' + observation_reason)
@@ -919,19 +965,25 @@ class RobotApi(Node):
             'reason': 'Software stop only; the vendor motor path has no verified independent stop/interlock.',
         }
         supervisor = stages.get('supervisor', {})
+        trial_service_ready = self._autonomy_disable_clients['supervised_trial'].service_is_ready()
+        trial_stage = stages.get('supervised_trial', {})
         command_path = (self._bridge_profile == 'command' and supervisor.get('fresh') and supervisor.get('enabled') is True and
                         all(stages.get(key, {}).get('fresh') and stages[key].get('enabled') is True
                             for key in ('gate', 'arbiter', 'relay')))
         components['motion_output'] = {
             'state': ('armed' if command_path else
                       'trial_armed' if self._bridge_profile == 'supervised_trial' and
-                      stages.get('supervised_trial', {}).get('fresh') and
-                      stages['supervised_trial'].get('enabled') else 'not_ready'),
+                      trial_stage.get('fresh') and trial_stage.get('enabled') else
+                      'ready_to_arm' if self._bridge_profile == 'supervised_trial' and
+                      trial_service_ready else 'not_ready'),
             'bridge_profile': self._bridge_profile,
             'commissioning_id': supervisor.get('commissioning_id'),
-            'reason': (stages.get('supervised_trial', {}).get('reason', 'Trial relay not ready')
+            'reason': (trial_stage.get('reason', 'Trial relay ready; waiting for an accepted goal and explicit arm')
+                       if self._bridge_profile == 'supervised_trial' and trial_service_ready else
+                       'Trial relay service is unavailable'
                        if self._bridge_profile == 'supervised_trial' else
                        supervisor.get('reason', 'No fresh commissioned supervisor state')),
+            'trial_service_ready': trial_service_ready,
             'trial_remaining_seconds': stages.get('supervised_trial', {}).get('remaining_seconds', 0),
         }
         map_info = None
@@ -1556,8 +1608,8 @@ class RobotApi(Node):
         if status['mapping']['process_running']:
             raise ApiError(409, 'Stop mapping before global localization.')
         if not all(status[name]['state'] == 'ready' for name in (
-                'map', 'camera', 'scan', 'odometry')):
-            raise ApiError(409, 'Fresh map, camera, scan, and odometry are required for global localization.')
+                'map', 'depth_sensor', 'scan', 'odometry')):
+            raise ApiError(409, 'Fresh map, depth sensor, scan, and odometry are required for global localization.')
         with self._goal_lock:
             if self._goal_requests:
                 raise ApiError(409, 'Cancel the active Nav2 goal before relocalizing.')
@@ -1604,7 +1656,9 @@ class RobotApi(Node):
             'motion_command_sent': False,
         }
 
-    def _validate_goal_cell(self, grid, x, y, *, use_operating_region=True):
+    def _validate_goal_cell(self, grid, x, y, *, use_operating_region=True,
+                            clearance=None, max_occupancy=15,
+                            region_name='saved map'):
         origin = grid.info.origin
         q = origin.orientation
         resolution = float(grid.info.resolution)
@@ -1629,8 +1683,12 @@ class RobotApi(Node):
             x0, y0, x1, y1 = self._operating_region
             if not x0 <= cx < x1 or not y0 <= cy < y1:
                 raise ApiError(400, 'Target is outside the reviewed operating region.')
-        clearance = self._goal_clearance_radius
-        radius = max(1, int(math.ceil(clearance / resolution)))
+        clearance = self._goal_clearance_radius if clearance is None else float(clearance)
+        if (not math.isfinite(clearance) or clearance < 0 or
+                not isinstance(max_occupancy, int) or isinstance(max_occupancy, bool) or
+                not 0 <= max_occupancy <= 100):
+            raise ApiError(400, 'Goal clearance must be finite and non-negative.')
+        radius = int(math.ceil(clearance / resolution))
         if cx < radius or cy < radius or cx >= width - radius or cy >= height - radius:
             raise ApiError(400, f'Goal lacks a full {clearance:.2f} m clearance inside the map boundary.')
         for row in range(max(0, cy - radius), min(height, cy + radius + 1)):
@@ -1638,14 +1696,25 @@ class RobotApi(Node):
                 if (col - cx) ** 2 + (row - cy) ** 2 > radius ** 2:
                     continue
                 value = int(grid.data[row * width + col])
-                if value < 0 or value > 15:
-                    raise ApiError(400, f'Goal is not in a known-free map region with {clearance:.2f} m clearance.')
+                if value < 0 or value > max_occupancy:
+                    detail = (f'with {clearance:.2f} m clearance'
+                              if clearance > 0 else 'at the selected cell')
+                    raise ApiError(
+                        400,
+                        f'Goal is not in a known-free/traversable {region_name} {detail}.')
 
     def _validate_live_clearance(self, x, y):
         global_grid = self._costmaps.get('global_costmap')
         if global_grid is None or global_grid.header.frame_id != 'map':
             raise ApiError(409, 'A current map-frame global costmap is required')
-        self._validate_goal_cell(global_grid, x, y, use_operating_region=False)
+        # Nav2 costmaps are already inflated around static/live obstacles.
+        # Applying the saved-map footprint radius to every inflated cell again
+        # double-counts clearance and can reject all usable room centers.
+        self._validate_goal_cell(
+            global_grid, x, y, use_operating_region=False, clearance=0.0,
+            # OccupancyGrid values 1..98 are traversable inflation costs;
+            # 99/100 correspond to inscribed/lethal Nav2 costs.
+            max_occupancy=98, region_name='live global costmap')
         local = self._costmaps.get('local_costmap')
         if local is None:
             raise ApiError(409, 'A current local costmap is required')
@@ -1662,7 +1731,9 @@ class RobotApi(Node):
         inside = (origin.x <= lx < origin.x+local.info.width*local.info.resolution and
                   origin.y <= ly < origin.y+local.info.height*local.info.resolution)
         if inside:
-            self._validate_goal_cell(local, lx, ly, use_operating_region=False)
+            self._validate_goal_cell(
+                local, lx, ly, use_operating_region=False, clearance=0.0,
+                max_occupancy=98, region_name='live local costmap')
 
     def _on_goal_result(self, goal_id, future):
         with self._goal_lock:
@@ -1785,7 +1856,7 @@ class RobotApi(Node):
                 raise ApiError(409, 'Stop localization/navigation before starting mapping.')
             if self._bridge_alive():
                 raise ApiError(409, 'The project odometry bridge is already running.')
-            if self._component('camera', time.monotonic())['state'] != 'ready':
+            if self._depth_sensor_component(time.monotonic())['state'] != 'ready':
                 raise ApiError(409, 'Depth camera data is not fresh; mapping was not started.')
             self._mapping_paused = False
             self._stitched_pointcloud.clear()
@@ -1852,7 +1923,7 @@ class RobotApi(Node):
                                  allow_legacy=self._bridge_profile != 'command')
         except (OSError, ValueError, KeyError) as error:
             raise ApiError(409, 'Map review/integrity check failed: ' + str(error))
-        if self._component('camera', time.monotonic())['state'] != 'ready':
+        if self._depth_sensor_component(time.monotonic())['state'] != 'ready':
             raise ApiError(409, 'Depth camera data is not fresh; navigation was not started.')
         with self._lock:
             if self._mapping_process is not None and self._mapping_process.poll() is None:
@@ -2339,9 +2410,16 @@ class RobotApi(Node):
             raise ApiError(409, 'That map name is reserved or already exists; choose a new name.')
         except ValueError as error:
             raise ApiError(400, str(error))
+        # Return the same identity fields exposed by /api/v1/maps.  The UI uses
+        # this response immediately, before a catalogue refresh can complete;
+        # omitting map_id left a newly saved map looking unusable for
+        # localization whenever that refresh overlapped another poll.
+        identity = read_bundle(prefix)
         return {
             'ok': True,
             'name': name,
+            'map_id': identity['map_id'],
+            'integrity': 'verified',
             'image_url': f'/maps/{image.name}',
             'yaml_url': f'/maps/{yaml_file.name}',
             'manifest_url': f'/maps/{manifest.name}',

@@ -29,7 +29,7 @@ def test_receipt_freshness_does_not_hide_old_or_frozen_acquisition():
 
 def test_operator_lease_is_exclusive_expires_and_cannot_resurrect():
     now=[10.0]
-    state=M.RuntimeState(clock=lambda:now[0])
+    state=M.RuntimeState(clock=lambda:now[0], lease_seconds=.8)
     token=state.acquire('a')
     with pytest.raises(ValueError):state.acquire('b')
     with pytest.raises(ValueError):state.renew('a',None,state.epoch)
@@ -42,3 +42,14 @@ def test_operator_lease_is_exclusive_expires_and_cannot_resurrect():
     with pytest.raises(ValueError):state.acquire('a')
     state.reset('explicit stop/restart')
     assert state.acquire('b')!=token
+
+
+def test_ui_lease_survives_short_stall_while_motion_heartbeat_fails_closed():
+    now = [10.0]
+    state = M.RuntimeState(clock=lambda: now[0], lease_seconds=5.0)
+    state.acquire('operator')
+    now[0] += 0.9
+    assert state.valid_lease()
+    assert not state.fresh_lease(0.8)
+    now[0] += 4.11
+    assert not state.valid_lease()

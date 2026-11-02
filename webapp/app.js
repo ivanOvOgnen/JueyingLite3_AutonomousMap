@@ -109,7 +109,7 @@ let browserSessionReady = false;
 let shutdownRequested = false;
 let latestRobotStatus = null;
 let refreshingStatus = false;
-let refreshingMapCatalog = false;
+let mapCatalogRefreshPromise = null;
 let refreshingLiveMap = false;
 let refreshingPointCloud = false;
 let goalFeedbackHoldUntil = 0;
@@ -166,7 +166,7 @@ function showGoalFeedback(message) {
 
 function updateControls(status) {
   const components = status?.components || {};
-  const cameraReady = components.camera?.state === "ready";
+  const depthSensorReady = (components.depth_sensor || components.camera)?.state === "ready";
   const mappingRunning = components.mapping?.process_running === true;
   const hasMap = Boolean(status?.map);
   const requiredCapabilities = ["priority_software_stop", "tracked_goal_lifecycle",
@@ -216,12 +216,12 @@ function updateControls(status) {
       !mapReviewed ? "This saved map can be used to test localization. Its geometry and route must be reviewed before target walking." :
       "This map has a matching integrity manifest and recorded review.";
   const bridgeProfile = components.motion_output?.bridge_profile;
-  startMappingButton.disabled = !canManageMapping || !cameraReady || mappingRunning ||
+  startMappingButton.disabled = !canManageMapping || !depthSensorReady || mappingRunning ||
     navStack.process_running || bridgeProfile !== "telemetry";
   stopMappingButton.disabled = !canManageMapping || !mappingRunning;
   pauseMappingButton.disabled = !canManageMapping || !mappingRunning || components.mapping?.paused === true;
   resumeMappingButton.disabled = !canManageMapping || !mappingRunning || components.mapping?.paused !== true;
-  startNavigationButton.disabled = !canManageMapping || !cameraReady || mappingRunning ||
+  startNavigationButton.disabled = !canManageMapping || !depthSensorReady || mappingRunning ||
     navStack.process_running || !robotMapNames.has(savedMapPreset.value) || !mapEntry?.map_id ||
     mapEntry.integrity === "failed_or_legacy" || (bridgeProfile === "command" && !mapReviewed);
   prepareTrialButton.disabled = !canManageMapping || mappingRunning || navStack.process_running ||
@@ -266,24 +266,24 @@ function updateControls(status) {
     !loadedMapId || loadedMapId !== nav.active_map_id || !controlLease || !previewRoute ||
     previewRoute.session_epoch !== nav.session_epoch;
   controlLeaseButton.disabled = !canManageMapping || !components.navigation_stack?.process_running || nav.stop_latched === true;
-  controlLeaseButton.textContent = controlLease && nav.operator_lease_valid ? "Session control active" : "Control this session";
+  controlLeaseButton.textContent = controlLease && nav.operator_lease_valid ? "1. Session control active" : "1. Control session";
   const canPreviewWithNav2 = canManageMapping && selectedTargetFree && targetMapEligible && !trialTargetTooFar &&
     !goalPending && loadedMapId && loadedMapName === savedMapPreset.value &&
     loadedMapId === nav.active_map_id && nav.planner_ready === true;
   previewPathButton.disabled = !loadedPixels || !loadedMetadata || !selectedGoal || !goalMode;
-  previewPathButton.textContent = canPreviewWithNav2 ? "Preview Nav2 route" : "Check saved-map line";
+  previewPathButton.textContent = canPreviewWithNav2 ? "2. Preview Nav2 route" : "2. Check saved-map line";
   armMotionButton.disabled = !canManageMapping || !controlLease ||
     !["command", "supervised_trial"].includes(components.motion_output?.bridge_profile) ||
     !["accepted", "executing"].includes(nav.active_goal_state);
   armMotionButton.textContent = components.motion_output?.bridge_profile === "supervised_trial" ?
-    "Arm supervised goal · 10 s" : "Arm commissioned motion";
+    "5. Arm movement / 10 s" : "5. Arm commissioned motion";
   finishScanButton.disabled = !canManageMapping || !mappingRunning || components.mapping?.paused === true;
   plannerOptInButton.disabled = !canManageMapping ||
     (!nav.goal_requests_enabled && (
       !targetMapEligible || nav.planner_ready !== true || loadedMapName !== savedMapPreset.value ||
       nav.active_map_name !== savedMapPreset.value || !controlLease));
   plannerOptInButton.textContent = nav.goal_requests_enabled
-    ? "Disable planner goal requests" : "Enable planner goal requests";
+    ? "3. Disable planner" : "3. Enable planner";
   setInitialPoseButton.disabled = !canManageMapping || !selectedGoal || goalMode || goalPending ||
     loadedMapName !== savedMapPreset.value || !components.navigation_stack?.process_running ||
     !loadedMapId || loadedMapId !== nav.active_map_id;
@@ -303,11 +303,11 @@ function updateControls(status) {
       "Mapping is running. Guide the robot manually, then finish and save." :
     navStack.process_running ? "Stop localization/Nav2 before mapping." :
     bridgeProfile !== "telemetry" ? "Latch project STOP, then choose Return to mapping mode." :
-    !cameraReady ? "Wait for fresh depth camera data; run the read-only preflight if it stays unavailable." :
+    !depthSensorReady ? "Wait for fresh depth sensor data; run the read-only preflight if it stays unavailable." :
     "Ready to start a manual scan.");
   const localizationReason = sessionReason || (navStack.process_running ?
     "Localization/Nav2 is running." : mappingRunning ? "Finish or stop mapping first." :
-    !cameraReady ? "Wait for fresh depth camera data." :
+    !depthSensorReady ? "Wait for fresh depth sensor data." :
     !robotMapNames.has(savedMapPreset.value) || !mapEntry?.map_id ? "Select a map saved on the robot; refresh status if it was just saved." :
     mapEntry.integrity === "failed_or_legacy" ? "This robot map failed its integrity check." :
     bridgeProfile === "command" && !mapReviewed ? "Command profile requires a reviewed map; return to telemetry for localization testing." :
@@ -328,7 +328,7 @@ function updateControls(status) {
     loadedMapId !== nav.active_map_id ? "The displayed map differs from the active localization map; reload the selected map." :
     !selectedGoal ? "Choose Robot is here or Navigation target, then click a known-free cell." :
     !goalMode ? "Use clicked point as robot location to seed AMCL, then wait for a stable estimate." :
-    !selectedTargetFree ? "This target is unknown or occupied on the saved map. Select a known-free cell before sending a robot goal." :
+    !selectedTargetFree ? "This target lacks the required saved-map clearance. Select the center of a wider white region." :
     !targetMapEligible ? "Target walking needs a reviewed map or a verified map in supervised trial mode." :
     localization.state !== "ready" ? "Wait for a stable AMCL estimate; verify its marker against the room." :
     trialTargetTooFar ? "Supervised trial targets must be within 0.50 m of the robot. Select a closer known-free cell." :
@@ -378,35 +378,42 @@ function updateControls(status) {
 }
 
 async function refreshMapCatalog() {
-  if (refreshingMapCatalog) return;
-  refreshingMapCatalog = true;
+  // Coalesce callers onto the active request. Save/finish actions await this
+  // function and must not resume with a half-populated map entry merely
+  // because the periodic catalogue poll was already in flight.
+  if (mapCatalogRefreshPromise) return mapCatalogRefreshPromise;
+  mapCatalogRefreshPromise = (async () => {
+    try {
+      const response = await fetch("/api/v1/maps", { cache: "no-store" });
+      if (!response.ok) return;
+      const result = await response.json();
+      robotMapNames = new Set((result.maps || []).map((map) => map.name).filter((name) => typeof name === "string"));
+      for (const map of result.maps || []) {
+        if (typeof map.name !== "string" || typeof map.image_url !== "string" || typeof map.yaml_url !== "string") continue;
+        const previous = mapCatalog.get(map.name);
+        if (loadedMapName === map.name && previous?.map_id && previous.map_id !== map.map_id) {
+          loadedMapId = null; selectedGoal = null; selectedTargetFree = false; selectedPixel = null; previewRoute = null; mapOnlyRoute = null;
+        }
+        mapCatalog.set(map.name, { ...map });
+        if (![...savedMapPreset.options].some((option) => option.value === map.name)) {
+          const option = new Option(map.name, map.name);
+          savedMapPreset.insertBefore(option, savedMapPreset.options[savedMapPreset.options.length - 1]);
+        }
+      }
+      if (!robotMapNames.has(savedMapPreset.value) && savedMapPreset.value !== "custom" && result.maps?.length) {
+        savedMapPreset.value = result.maps[0].name;
+        hostedImageUrl.value = result.maps[0].image_url;
+        hostedYamlUrl.value = result.maps[0].yaml_url;
+      }
+      updateControls(latestRobotStatus);
+    } catch (_error) {
+      // A status-only gateway can still be used when its saved-map catalog is unavailable.
+    }
+  })();
   try {
-    const response = await fetch("/api/v1/maps", { cache: "no-store" });
-    if (!response.ok) return;
-    const result = await response.json();
-    robotMapNames = new Set((result.maps || []).map((map) => map.name).filter((name) => typeof name === "string"));
-    for (const map of result.maps || []) {
-      if (typeof map.name !== "string" || typeof map.image_url !== "string" || typeof map.yaml_url !== "string") continue;
-      const previous = mapCatalog.get(map.name);
-      if (loadedMapName === map.name && previous?.map_id && previous.map_id !== map.map_id) {
-        loadedMapId = null; selectedGoal = null; selectedTargetFree = false; selectedPixel = null; previewRoute = null; mapOnlyRoute = null;
-      }
-      mapCatalog.set(map.name, { ...map });
-      if (![...savedMapPreset.options].some((option) => option.value === map.name)) {
-        const option = new Option(map.name, map.name);
-        savedMapPreset.insertBefore(option, savedMapPreset.options[savedMapPreset.options.length - 1]);
-      }
-    }
-    if (!robotMapNames.has(savedMapPreset.value) && savedMapPreset.value !== "custom" && result.maps?.length) {
-      savedMapPreset.value = result.maps[0].name;
-      hostedImageUrl.value = result.maps[0].image_url;
-      hostedYamlUrl.value = result.maps[0].yaml_url;
-    }
-    updateControls(latestRobotStatus);
-  } catch (_error) {
-    // A status-only gateway can still be used when its saved-map catalog is unavailable.
+    return await mapCatalogRefreshPromise;
   } finally {
-    refreshingMapCatalog = false;
+    mapCatalogRefreshPromise = null;
   }
 }
 
@@ -844,9 +851,14 @@ saveMapButton.addEventListener("click", async () => {
       option = new Option(name, name);
       savedMapPreset.insertBefore(option, savedMapPreset.options[savedMapPreset.options.length - 1]);
     }
-    mapCatalog.set(name, { image_url: result.image_url, yaml_url: result.yaml_url });
     savedMapPreset.value = name;
     await refreshMapCatalog();
+    // A catalogue request that started just before this save can legitimately
+    // omit the new map. The successful save response is authoritative, so
+    // restore the complete entry after awaiting that request.
+    robotMapNames.add(name);
+    mapCatalog.set(name, { ...mapCatalog.get(name), ...result });
+    updateControls(latestRobotStatus);
     mapSaveStatus.textContent = `Saved ${name}.pgm and ${name}.yaml on the robot. Select “Load selected map” to inspect them.`;
   } catch (error) {
     mapSaveStatus.textContent = `Map was not saved: ${error.message}`;
@@ -1629,6 +1641,9 @@ mapCanvas.addEventListener("click", (event) => {
   const gray = (loadedPixels.data[offset] + loadedPixels.data[offset+1] + loadedPixels.data[offset+2]) / 3;
   const occupancy = loadedMetadata.negate ? gray/255 : (255-gray)/255;
   const knownFree = occupancy < loadedMetadata.freeThreshold;
+  const requiredClearance = latestRobotStatus?.components?.navigation?.goal_clearance_radius ?? 0.30;
+  const goalClearanceFree = knownFree && knownFreeWithClearance(
+    worldX, worldY, requiredClearance);
   if (!knownFree && mapClickMode.value === "initial") {
     showGoalFeedback("Choose a known-free map cell; occupied and unknown targets are rejected.");
     return;
@@ -1637,10 +1652,11 @@ mapCanvas.addEventListener("click", (event) => {
   mapOnlyRoute = null;
   selectedPixel = { x: pixelX, y: pixelY };
   selectedGoal = { x: worldX, y: worldY, yaw: 0.0 };
-  selectedTargetFree = knownFree;
+  selectedTargetFree = mapClickMode.value === "initial" ? knownFree : goalClearanceFree;
   clickedPositionHint.textContent = mapClickMode.value === "initial" ?
     "This is where the robot is now. Set its heading, then use this point as the robot location." :
-    knownFree ? "This is the target. Preview its route before sending it to Nav2." :
+    goalClearanceFree ? "This target has the required saved-map clearance. Preview its route before sending it to Nav2." :
+      knownFree ? `This cell is free, but it lacks ${requiredClearance.toFixed(2)} m surrounding clearance. Click nearer the center of a wider white region.` :
       "Target saved for inspection. This cell is unknown or occupied; Nav2 cannot drive to it.";
   updateGoalCoordinates();
   goalPreview.hidden = false;
@@ -1705,11 +1721,15 @@ finishScanButton.addEventListener("click", async () => {
     const response = await callMappingApi("/api/v1/maps/finish", {name: saveMapName.value, stationary_ack: true});
     apiActionStatus.textContent = response.message;
     await refreshMapCatalog();
-    if ([...savedMapPreset.options].some((option) => option.value === response.name)) {
-      savedMapPreset.value = response.name;
-      hostedImageUrl.value = response.image_url;
-      hostedYamlUrl.value = response.yaml_url;
+    robotMapNames.add(response.name);
+    mapCatalog.set(response.name, { ...mapCatalog.get(response.name), ...response });
+    if (![...savedMapPreset.options].some((option) => option.value === response.name)) {
+      const option = new Option(response.name, response.name);
+      savedMapPreset.insertBefore(option, savedMapPreset.options[savedMapPreset.options.length - 1]);
     }
+    savedMapPreset.value = response.name;
+    hostedImageUrl.value = response.image_url;
+    hostedYamlUrl.value = response.yaml_url;
     mapSaveStatus.textContent = `Saved ${response.name}.pgm and ${response.name}.yaml on the robot. Load selected map to inspect it.`;
     updateControls(latestRobotStatus);
   } catch (error) { mapSaveStatus.textContent = `Map was not saved: ${error.message}`; }
@@ -1724,8 +1744,14 @@ setInterval(async () => {
     const response = await fetch("/api/v1/control/heartbeat", {method: "POST", credentials: "same-origin",
       headers: {"Content-Type": "application/json"}, signal: controller.signal,
       body: JSON.stringify({lease_token: controlLease.lease_token, session_epoch: controlLease.session_epoch})});
-    if (!response.ok) throw new Error("Control lease expired");
-  } catch (_error) { controlLease = null; }
+    // An HTTP rejection is authoritative. A single tunnel timeout is not:
+    // retain the token and retry on the next tick. The API's independent
+    // 0.8-second expiry still fails closed if heartbeats really cease.
+    if (!response.ok) controlLease = null;
+  } catch (_error) {
+    // Transient network/AbortController failure. Do not manufacture or
+    // extend a lease here; simply let the next visible-page tick retry it.
+  }
   finally { clearTimeout(deadline); leaseRenewing = false; }
 }, 200);
 function releasePageControl() {
