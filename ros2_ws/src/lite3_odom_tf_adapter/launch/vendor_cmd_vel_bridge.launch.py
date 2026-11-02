@@ -2,7 +2,7 @@
 
 This launch is never included by navigation.launch.py. It starts only the
 guarded relay. The project owns one combined ROS 1 parameter bridge for both
-``/leg_odom2`` and ``/cmd_vel_corrected``; starting another parameter_bridge
+``/leg_odom2`` and ``/cmd_vel``; starting another parameter_bridge
 here would create competing bridge processes and is intentionally avoided.
 The relay still refuses its enable service unless the physical-stop parameter
 is true and the shared stop record is fresh and clear.

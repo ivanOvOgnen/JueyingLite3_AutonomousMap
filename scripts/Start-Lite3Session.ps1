@@ -136,7 +136,7 @@ $sshArgs = @(
 
 Write-Host ""
 Write-Host "Starting SSH tunnels through YSC to the perception API and its SSH port in a separate visible window." -ForegroundColor Cyan
-Write-Host "HTTP status uses YSC's current internal route. The perception SSH forward is loopback-only and is used only if the UI needs deployment. Accept host keys only if they match a robot you recognize; enter passwords at the prompts."
+Write-Host "HTTP status uses YSC's current internal route. The perception SSH forward is loopback-only and is available for separately requested maintenance. Accept host keys only if they match a robot you recognize; enter passwords at the prompts."
 Write-Host "No password or key is written by this script. Close that SSH window or press Ctrl+C there to disconnect."
 $helperPath = Join-Path $env:TEMP "lite3_ssh_tunnel_$PID.ps1"
 $exitPath = Join-Path $env:TEMP "lite3_ssh_tunnel_$PID.exit"
@@ -185,36 +185,8 @@ if (-not $verified) {
 $servedAppUrl = "http://${laptopIPv4}:${LocalPort}/app.js"
 $servedApp = $null
 try { $servedApp = (Invoke-WebRequest -Uri $servedAppUrl -UseBasicParsing -TimeoutSec 5).Content } catch { }
-if ($servedApp -notmatch 'UI_DEPLOY_VERSION\s*=\s*24') {
-    if (-not $status.components.global_localization -or -not $status.components.safety_stop -or
-        -not $status.components.localization -or
-        -not $status.components.transforms -or -not $status.components.costmaps -or
-        $status.components.localization.PSObject.Properties.Name -notcontains 'converged' -or
-        $status.components.global_localization.PSObject.Properties.Name -notcontains 'refresh_ready' -or
-        $status.components.navigation.PSObject.Properties.Name -notcontains 'goal_requests_opt_in_available' -or
-        $status.components.navigation.PSObject.Properties.Name -notcontains 'active_map_name') {
-        throw "The robot API lacks the localization, transform, costmap, or planner opt-in fields required by local UI version 24. No UI files were changed. Deploy/build the matching API before installing the UI."
-    }
-    $localIndex = Join-Path $PSScriptRoot "..\webapp\index.html"
-    $localApp = Join-Path $PSScriptRoot "..\webapp\app.js"
-    $localStyles = Join-Path $PSScriptRoot "..\webapp\styles.css"
-    if (-not (Test-Path $localIndex) -or -not (Test-Path $localApp) -or -not (Test-Path $localStyles)) {
-        throw "The robot UI is older than this project copy, and local HTML, JS, or CSS files were not found beside this script."
-    }
-    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $backupDir = "~/lite3_autonomy_ws/backups/$(Get-Date -Format yyyyMMdd)/startup_ui_predeploy_$stamp"
-    $backupCommand = "mkdir -p $backupDir && cp -p ~/lite3_autonomy_ws/webapp/index.html ~/lite3_autonomy_ws/webapp/app.js ~/lite3_autonomy_ws/webapp/styles.css $backupDir/"
-    Write-Host "The robot's served UI is older than this project copy. Backing up and installing only index.html, app.js, and styles.css (no API restart)." -ForegroundColor Yellow
-    Write-Host "The perception SSH connection is forwarded through YSC; its first use may ask you to confirm the perception host key and enter its password."
-    & $sshCommand.Source -p $perceptionSshLocalPort "ysc@127.0.0.1" $backupCommand
-    if ($LASTEXITCODE -ne 0) { throw "Could not create the dated robot UI backup; no UI files were copied." }
-    $scpCommand = Get-Command scp.exe -ErrorAction SilentlyContinue
-    if (-not $scpCommand) { throw "scp.exe was not found. The robot UI backup exists; enable the Windows OpenSSH Client and retry." }
-    & $scpCommand.Source -P $perceptionSshLocalPort $localIndex $localApp $localStyles "ysc@127.0.0.1:/home/ysc/lite3_autonomy_ws/webapp/"
-    if ($LASTEXITCODE -ne 0) { throw "UI file copy failed. The dated pre-deploy backup is at $backupDir on the perception computer." }
-    try { $servedApp = (Invoke-WebRequest -Uri $servedAppUrl -UseBasicParsing -TimeoutSec 5).Content } catch { $servedApp = $null }
-    if ($servedApp -notmatch 'UI_DEPLOY_VERSION\s*=\s*24') { throw "The UI files were copied, but the served app did not report UI deployment version 24. Backup: $backupDir. Do not restart robot services as a workaround." }
-    Write-Host "Updated UI assets are being served. Backup: $backupDir" -ForegroundColor Green
+if ($servedApp -notmatch 'UI_DEPLOY_VERSION\s*=\s*30') {
+    Write-Warning "The served UI differs from local version 30. Connection startup never deploys files. Use the explicit deployment tool after reviewing API compatibility and backups."
 }
 
 Write-Host ""

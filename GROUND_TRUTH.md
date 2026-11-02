@@ -1,5 +1,11 @@
 # Ground Truth: Robot Observations
 
+## Latest user-observed state — 2026-10-24
+
+The 18:38 one-shot deployment report says the project bundle was installed and the operator confirmed the DEEP manual joystick still worked. Its robot backup was `/home/ysc/lite3_autonomy_ws/backups/20240912/supervised_nav_20240912_072542`; the laptop retained a copy under `log/nav2_robot_backup_20261024_183816/`. A subsequent Room Mapper screenshot shows a selected target but blocks submission: both costmaps fail source-timestamp freshness/order checks, depth obstacle acquisition time or map/odom TF is not current, and there is no operator lease. The screenshot contains no numeric source ages, raw headers, or TF lookup result. It does not establish which of clock synchronization, upstream stamps, TF history, or costmap publication is at fault.
+
+No physical Nav2 map-click walk is verified after this deployment. A prior bounded direct vendor velocity test and a working manual joystick do not demonstrate autonomous navigation. The older 2026-10-19 ready-costmap snapshots below are historical states on another session; they are not evidence that the current costmaps are ready.
+
 ## Latest live observation - 2026-10-19
 
 The current laptop session reaches `http://192.168.2.39:18080/`. The browser is paired, map `v3_soba_ogi_test2` is loaded, and project Localization/Nav2 is running. Automatic global localization converged without commanding motion. At preflight completion AMCL was ready with 58 stable samples, `refresh_active=true`, pose `(1.1149, 0.0788, -1.8262 rad)`, and covariance `(0.001898, 0.000461, 0.000347)`; the later no-write confirmation reached 86 stable samples near `(1.1237, 0.0832, -1.8292 rad)`. Camera, odometry, scan, point cloud, all four required TF checks, both Nav2 costmaps, and the action server were fresh/ready; `planner_ready=true`.

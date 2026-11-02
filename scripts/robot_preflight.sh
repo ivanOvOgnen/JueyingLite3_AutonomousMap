@@ -82,6 +82,11 @@ topics_to_check = (
     '/leg_odom2', '/odom', '/scan', '/map', '/amcl_pose',
     '/cmd_vel', '/nav2/cmd_vel', '/autonomy/cmd_vel',
     '/autonomy/cmd_vel_arbited', '/cmd_vel_corrected', '/commands/joy_raw',
+    '/autonomy/manual_override', '/autonomy/ready', '/autonomy/context',
+    '/autonomy/gate/status', '/autonomy/arbiter/status',
+    '/autonomy/vendor_bridge/status', '/autonomy/supervisor/status',
+    '/autonomy/supervised_trial/status',
+    '/perception/depth_obstacles',
 )
 rclpy.init()
 node = Node('lite3_readonly_preflight_graph')

@@ -1,12 +1,13 @@
 "use strict";
 
 // Same-origin robot API for mapping and explicitly gated Nav2 planner requests.
-const UI_DEPLOY_VERSION = 24;
+const UI_DEPLOY_VERSION = 30;
 const imageInput = document.getElementById("mapImageInput");
 const yamlInput = document.getElementById("mapYamlInput");
 const loadButton = document.getElementById("loadMapButton");
 const loadHostedMapButton = document.getElementById("loadHostedMapButton");
 const savedMapPreset = document.getElementById("savedMapPreset");
+const selectedMapReviewStatus = document.getElementById("selectedMapReviewStatus");
 const hostedImageUrl = document.getElementById("hostedImageUrl");
 const hostedYamlUrl = document.getElementById("hostedYamlUrl");
 const mapCanvas = document.getElementById("mapCanvas");
@@ -26,6 +27,7 @@ const mapCellCounts = document.getElementById("mapCellCounts");
 const mapQualityNote = document.getElementById("mapQualityNote");
 const goalPreview = document.getElementById("goalPreview");
 const goalCoordinates = document.getElementById("goalCoordinates");
+const clickedPositionHint = document.getElementById("clickedPositionHint");
 const sendGoalButton = document.getElementById("sendGoalButton");
 const plannerOptInButton = document.getElementById("plannerOptInButton");
 const cancelGoalButton = document.getElementById("cancelGoalButton");
@@ -57,13 +59,18 @@ const motionOutputStatus = document.getElementById("motionOutputStatus");
 const startMappingButton = document.getElementById("startMappingButton");
 const stopMappingButton = document.getElementById("stopMappingButton");
 const startNavigationButton = document.getElementById("startNavigationButton");
+const returnMappingButton = document.getElementById("returnMappingButton");
+const prepareTrialButton = document.getElementById("prepareTrialButton");
 const stopNavigationButton = document.getElementById("stopNavigationButton");
 const stopAutonomyButton = document.getElementById("stopAutonomyButton");
 const safetyStopStatus = document.getElementById("safetyStopStatus");
 const saveMapButton = document.getElementById("saveMapButton");
+const mapSaveStatus = document.getElementById("mapSaveStatus");
 const saveMapName = document.getElementById("saveMapName");
 const pairStatus = document.getElementById("pairStatus");
 const apiActionStatus = document.getElementById("apiActionStatus");
+const mappingReadinessStatus = document.getElementById("mappingReadinessStatus");
+const goalReadinessStatus = document.getElementById("goalReadinessStatus");
 const pauseMappingButton = document.getElementById("pauseMappingButton");
 const resumeMappingButton = document.getElementById("resumeMappingButton");
 const runPreflightButton = document.getElementById("runPreflightButton");
@@ -85,23 +92,29 @@ const cloudViewMode = document.getElementById("cloudViewMode");
 const cloudAutoFilter = document.getElementById("cloudAutoFilter");
 const cloudMaxRange = document.getElementById("cloudMaxRange");
 const cloudRangeValue = document.getElementById("cloudRangeValue");
-const savedCloudInput = document.getElementById("savedCloudInput");
-const savedCloudReset = document.getElementById("savedCloudReset");
-const savedCloudCanvas = document.getElementById("savedCloudCanvas");
-const savedCloudContext = savedCloudCanvas.getContext("2d", { alpha: false });
-const savedCloudEmpty = document.getElementById("savedCloudEmpty");
-const savedCloudState = document.getElementById("savedCloudState");
-const savedCloudMeta = document.getElementById("savedCloudMeta");
+const modeBadge = document.getElementById("modeBadge");
+const controlLeaseButton = document.getElementById("controlLeaseButton");
+const previewPathButton = document.getElementById("previewPathButton");
+const armMotionButton = document.getElementById("armMotionButton");
+const finishScanButton = document.getElementById("finishScanButton");
+let controlLease = null;
+let leaseRenewing = false;
+let loadedMapId = null;
+let previewRoute = null;
+let mapOnlyRoute = null;
+let displayedSessionEpoch = null;
 const mapCatalog = new Map();
 let apiConnected = false;
 let browserSessionReady = false;
 let shutdownRequested = false;
 let latestRobotStatus = null;
 let refreshingStatus = false;
-let refreshingMapCatalog = false;
+let mapCatalogRefreshPromise = null;
 let refreshingLiveMap = false;
 let refreshingPointCloud = false;
+let goalFeedbackHoldUntil = 0;
 let selectedGoal = null;
+let selectedTargetFree = false;
 let globalLocalizationPending = false;
 let loadedMapName = null;
 let robotMapNames = new Set();
@@ -113,12 +126,6 @@ let cloudElevation = 0.55;
 let cloudZoom = 1;
 let cloudDrag = null;
 let lastPointCloudPoll = 0;
-let savedCloudPoints = null;
-let savedCloudAzimuth = 0.8;
-let savedCloudElevation = 0.55;
-let savedCloudZoom = 1;
-let savedCloudDrag = null;
-let savedCloudPan = [0, 0];
 
 for (const option of savedMapPreset.options) {
   if (option.value !== "custom") {
@@ -130,6 +137,7 @@ for (const option of savedMapPreset.options) {
 }
 
 savedMapPreset.addEventListener("change", () => {
+  selectedGoal = null; selectedTargetFree = false; selectedPixel = null; previewRoute = null; mapOnlyRoute = null; goalPreview.hidden = true;
   updateControls(latestRobotStatus);
   if (savedMapPreset.value === "custom") return;
   const pair = mapCatalog.get(savedMapPreset.value);
@@ -146,63 +154,223 @@ for (const field of [hostedImageUrl, hostedYamlUrl]) {
 
 function setStatusValue(element, component) {
   const state = component?.state || "unknown";
-  if (element === motionOutputStatus && state === "not_ready") {
-    element.textContent = "isolated";
-    element.className = "status-ready";
-    return;
-  }
   element.textContent = state.replaceAll("_", " ");
   element.className = state === "ready" ? "status-ready" :
     state === "unknown" || state === "starting" ? "unknown" : "status-error";
 }
 
+function showGoalFeedback(message) {
+  goalActionStatus.textContent = message;
+  goalFeedbackHoldUntil = Date.now() + 12000;
+}
+
 function updateControls(status) {
   const components = status?.components || {};
-  const cameraReady = components.camera?.state === "ready";
+  const depthSensorReady = (components.depth_sensor || components.camera)?.state === "ready";
   const mappingRunning = components.mapping?.process_running === true;
   const hasMap = Boolean(status?.map);
-  const canManageMapping = apiConnected && browserSessionReady && !shutdownRequested;
+  const requiredCapabilities = ["priority_software_stop", "tracked_goal_lifecycle",
+    "map_identity", "path_preview", "operator_lease"];
+  const backendCompatible = status?.api_contract_version === 2 &&
+    requiredCapabilities.every((name) => status?.capabilities?.includes(name));
+  const canManageMapping = apiConnected && browserSessionReady &&
+    backendCompatible && !shutdownRequested;
+  for (const button of [mapZoomInButton, mapZoomOutButton, mapResetViewButton]) {
+    button.disabled = !loadedPixels;
+    button.title = loadedPixels ? "" : "Load a 2D map before changing its view.";
+  }
   pairStatus.textContent = !apiConnected ? "Robot API disconnected." :
+    !backendCompatible ? "This page and the robot API are different versions. Open a fresh tab from the robot after restoring matching UI files." :
     browserSessionReady ? "This browser is connected locally. Mapping controls are available." :
       "Connected for status only; automatic browser sessions need the updated robot API.";
   runPreflightButton.disabled = !canManageMapping;
   preparePoweroffButton.disabled = !canManageMapping;
   const nav = components.navigation || {};
+  modeBadge.textContent = status?.simulation === true ? "DEMO MODE" : "PLANNER GATED";
+  if (displayedSessionEpoch !== null && nav.session_epoch !== displayedSessionEpoch) {
+    selectedGoal = null; selectedTargetFree = false; selectedPixel = null; previewRoute = null; mapOnlyRoute = null; controlLease = null;
+    goalPreview.hidden = true;
+  }
+  displayedSessionEpoch = nav.session_epoch ?? null;
+  if (previewRoute && nav.path_preview?.preview_id !== previewRoute.preview_id) previewRoute = null;
+  if (mapOnlyRoute && components.localization?.pose &&
+      Math.hypot(mapOnlyRoute.start[0] - components.localization.pose.x,
+                 mapOnlyRoute.start[1] - components.localization.pose.y) > 0.10) mapOnlyRoute = null;
   const navStack = components.navigation_stack || {};
-  startMappingButton.disabled = !canManageMapping || !cameraReady || mappingRunning;
+  const mapEntry = mapCatalog.get(savedMapPreset.value);
+  const mapReviewed = mapEntry?.integrity === "verified" && mapEntry?.approval_state === "reviewed";
+  const trialMapEligible = components.motion_output?.bridge_profile === "supervised_trial" &&
+    mapEntry?.integrity === "verified" && nav.active_map_target_eligible === true;
+  const targetMapEligible = mapReviewed || trialMapEligible;
+  const localizedPose = components.localization?.pose;
+  const trialTargetTooFar = trialMapEligible && selectedGoal && localizedPose &&
+    Math.hypot(selectedGoal.x - localizedPose.x, selectedGoal.y - localizedPose.y) > 0.50;
+  selectedMapReviewStatus.textContent = !robotMapNames.has(savedMapPreset.value) ?
+    "This map is not in the robot catalogue. Save or select a robot-hosted map." :
+    mapEntry?.integrity === "legacy_unverified" ?
+      "This legacy map can be used to test localization. It needs a new verified scan and measured review before target walking." :
+      mapEntry?.integrity !== "verified" ?
+        "This map failed integrity checks and cannot be used for localization or walking." :
+      !mapReviewed && trialMapEligible ?
+        "This unreviewed map allows only an attended 0.5 m trial through known-free cells after route preview and live obstacle checks." :
+      !mapReviewed ? "This saved map can be used to test localization. Its geometry and route must be reviewed before target walking." :
+      "This map has a matching integrity manifest and recorded review.";
+  const bridgeProfile = components.motion_output?.bridge_profile;
+  startMappingButton.disabled = !canManageMapping || !depthSensorReady || mappingRunning ||
+    navStack.process_running || bridgeProfile !== "telemetry";
   stopMappingButton.disabled = !canManageMapping || !mappingRunning;
   pauseMappingButton.disabled = !canManageMapping || !mappingRunning || components.mapping?.paused === true;
   resumeMappingButton.disabled = !canManageMapping || !mappingRunning || components.mapping?.paused !== true;
-  startNavigationButton.disabled = !canManageMapping || !cameraReady || mappingRunning ||
-    navStack.process_running || !robotMapNames.has(savedMapPreset.value);
+  startNavigationButton.disabled = !canManageMapping || !depthSensorReady || mappingRunning ||
+    navStack.process_running || !robotMapNames.has(savedMapPreset.value) || !mapEntry?.map_id ||
+    mapEntry.integrity === "failed_or_legacy" || (bridgeProfile === "command" && !mapReviewed);
+  prepareTrialButton.disabled = !canManageMapping || mappingRunning || navStack.process_running ||
+    components.safety_stop?.state !== "latched" || bridgeProfile === "supervised_trial";
+  returnMappingButton.disabled = !canManageMapping || mappingRunning || navStack.process_running ||
+    components.safety_stop?.state !== "latched" || bridgeProfile === "telemetry";
+  prepareTrialButton.textContent = components.motion_output?.bridge_profile === "supervised_trial" ?
+    "Supervised walking trial prepared" : "Prepare supervised walking trial";
   stopNavigationButton.disabled = !canManageMapping || !navStack.process_running;
   stopAutonomyButton.disabled = !canManageMapping;
   stopAutonomyButton.textContent = components.safety_stop?.state === "latched"
     ? "STOP AUTONOMY · LATCHED" : "STOP AUTONOMY";
-  saveMapButton.disabled = !canManageMapping || !hasMap;
+  const stop = components.safety_stop || {};
+  if (stop.cleanup_error) {
+    safetyStopStatus.textContent = `Software STOP is latched, but cleanup failed: ${stop.cleanup_error}. Use the vendor stop control and check the robot.`;
+  } else if (stop.cleanup_pending) {
+    safetyStopStatus.textContent = "Software STOP is latched. Output disable was requested; navigation cleanup is pending.";
+  } else if (stop.state === "latched" && Object.keys(stop.disable_results || {}).length) {
+    const results = Object.entries(stop.disable_results)
+      .map(([name, result]) => `${name.replaceAll("_", " ")}: ${result}`).join(" · ");
+    safetyStopStatus.textContent = `Software STOP is latched; navigation cleanup completed. ${results}. This does not confirm a physical stop.`;
+  } else if (stop.state === "not_latched") {
+    safetyStopStatus.textContent = "Project software STOP is clear. Keep the DEEP app STOP within reach during a supervised trial.";
+  }
+  const liveMapReady = mappingRunning && components.mapping?.paused !== true &&
+    components.map?.state === "ready";
+  saveMapButton.disabled = !canManageMapping || !liveMapReady;
+  saveMapButton.title = liveMapReady ? "Save the current live SLAM map" :
+    components.mapping?.paused === true ? "Resume mapping and wait for a fresh live map before saving." :
+    "Start mapping and wait for a fresh live map. A saved localization map cannot be saved as a new scan.";
+  finishScanButton.title = components.mapping?.paused === true ?
+    "Resume mapping, then hold still and finish the scan." :
+    "Finish requires a running scan and two seconds of stationary odometry.";
   const goalMode = mapClickMode.value === "goal";
-  sendGoalButton.disabled = !canManageMapping || !selectedGoal || !goalMode || nav.state !== "ready";
-  sendGoalButton.disabled = sendGoalButton.disabled || loadedMapName !== savedMapPreset.value;
+  const goalPending = (nav.unresolved_goal_count || 0) > 0 ||
+    ["accepted", "executing", "canceling", "requesting", "acceptance_pending",
+      "cancel_unconfirmed", "unresolved"].includes(nav.active_goal_state);
+  sendGoalButton.disabled = !canManageMapping || !selectedGoal || !goalMode || !selectedTargetFree ||
+    !targetMapEligible || trialTargetTooFar ||
+    nav.state !== "ready" || goalPending;
+  sendGoalButton.disabled = sendGoalButton.disabled || loadedMapName !== savedMapPreset.value ||
+    !loadedMapId || loadedMapId !== nav.active_map_id || !controlLease || !previewRoute ||
+    previewRoute.session_epoch !== nav.session_epoch;
+  controlLeaseButton.disabled = !canManageMapping || !components.navigation_stack?.process_running || nav.stop_latched === true;
+  controlLeaseButton.textContent = controlLease && nav.operator_lease_valid ? "1. Session control active" : "1. Control session";
+  const canPreviewWithNav2 = canManageMapping && selectedTargetFree && targetMapEligible && !trialTargetTooFar &&
+    !goalPending && loadedMapId && loadedMapName === savedMapPreset.value &&
+    loadedMapId === nav.active_map_id && nav.planner_ready === true;
+  previewPathButton.disabled = !loadedPixels || !loadedMetadata || !selectedGoal || !goalMode;
+  previewPathButton.textContent = canPreviewWithNav2 ? "2. Preview Nav2 route" : "2. Check saved-map line";
+  armMotionButton.disabled = !canManageMapping || !controlLease ||
+    !["command", "supervised_trial"].includes(components.motion_output?.bridge_profile) ||
+    !["accepted", "executing"].includes(nav.active_goal_state);
+  armMotionButton.textContent = components.motion_output?.bridge_profile === "supervised_trial" ?
+    "5. Arm movement / 10 s" : "5. Arm commissioned motion";
+  finishScanButton.disabled = !canManageMapping || !mappingRunning || components.mapping?.paused === true;
   plannerOptInButton.disabled = !canManageMapping ||
     (!nav.goal_requests_enabled && (
-      nav.planner_ready !== true || loadedMapName !== savedMapPreset.value ||
-      nav.active_map_name !== savedMapPreset.value));
+      !targetMapEligible || nav.planner_ready !== true || loadedMapName !== savedMapPreset.value ||
+      nav.active_map_name !== savedMapPreset.value || !controlLease));
   plannerOptInButton.textContent = nav.goal_requests_enabled
-    ? "Disable planner goal requests" : "Enable planner goal requests";
-  setInitialPoseButton.disabled = !canManageMapping || !selectedGoal || goalMode ||
-    loadedMapName !== savedMapPreset.value || !components.navigation_stack?.process_running;
+    ? "3. Disable planner" : "3. Enable planner";
+  setInitialPoseButton.disabled = !canManageMapping || !selectedGoal || goalMode || goalPending ||
+    loadedMapName !== savedMapPreset.value || !components.navigation_stack?.process_running ||
+    !loadedMapId || loadedMapId !== nav.active_map_id;
   globalLocalizationButton.disabled = !canManageMapping ||
     components.global_localization?.state !== "ready" || mappingRunning ||
     components.global_localization?.search_active === true ||
     ["map", "camera", "scan", "odometry"].some((name) => components[name]?.state !== "ready") ||
-    ["accepted", "executing", "canceling", "requesting"].includes(nav.active_goal_state);
-  cancelGoalButton.disabled = !canManageMapping || !["accepted", "executing", "canceling"].includes(nav.active_goal_state);
-  goalActionStatus.textContent = nav.reason ||
-    "Planner action is disabled by default. The velocity gate has no robot output connection.";
-  if (nav.active_goal_detail) {
-    if (nav.active_goal_state === "finished_4") {
+    goalPending;
+  cancelGoalButton.disabled = !canManageMapping || !goalPending;
+  const localization = components.localization || {};
+  const sessionReason = !apiConnected ? "Connect to the robot API." :
+    !backendCompatible ? "Robot API and page versions differ; deploy matching files." :
+    !browserSessionReady ? "Click Connect & check status to create a browser session." :
+    shutdownRequested ? "The project API was shut down." : "";
+  const mappingReason = sessionReason || (mappingRunning ?
+    components.mapping?.paused === true ? "Mapping is paused. Resume before saving or finishing." :
+      "Mapping is running. Guide the robot manually, then finish and save." :
+    navStack.process_running ? "Stop localization/Nav2 before mapping." :
+    bridgeProfile !== "telemetry" ? "Latch project STOP, then choose Return to mapping mode." :
+    !depthSensorReady ? "Wait for fresh depth sensor data; run the read-only preflight if it stays unavailable." :
+    "Ready to start a manual scan.");
+  const localizationReason = sessionReason || (navStack.process_running ?
+    "Localization/Nav2 is running." : mappingRunning ? "Finish or stop mapping first." :
+    !depthSensorReady ? "Wait for fresh depth sensor data." :
+    !robotMapNames.has(savedMapPreset.value) || !mapEntry?.map_id ? "Select a map saved on the robot; refresh status if it was just saved." :
+    mapEntry.integrity === "failed_or_legacy" ? "This robot map failed its integrity check." :
+    bridgeProfile === "command" && !mapReviewed ? "Command profile requires a reviewed map; return to telemetry for localization testing." :
+    "Ready to start localization on the selected robot map.");
+  const trialReason = sessionReason || (mappingRunning || navStack.process_running ?
+    "Stop mapping and localization/Nav2 before changing bridge mode." :
+    components.safety_stop?.state !== "latched" ? "Press STOP AUTONOMY before changing bridge mode." :
+    bridgeProfile === "supervised_trial" ? "Supervised trial mode is prepared." :
+    "Supervised trial mode can be prepared now.");
+  mappingReadinessStatus.textContent = `Mapping: ${mappingReason} Localization: ${localizationReason} Trial mode: ${trialReason}`;
+  startMappingButton.title = mappingReason;
+  startNavigationButton.title = localizationReason;
+  prepareTrialButton.title = trialReason;
+  returnMappingButton.title = trialReason;
+  const goalReason = sessionReason || (!navStack.process_running ? "Start localization/Nav2." :
+    nav.stop_latched === true ? "Project STOP is latched; restart localization/Nav2 before requesting a goal." :
+    !loadedMapId || loadedMapName !== savedMapPreset.value ? "Load the selected robot map using Load selected map." :
+    loadedMapId !== nav.active_map_id ? "The displayed map differs from the active localization map; reload the selected map." :
+    !selectedGoal ? "Choose Robot is here or Navigation target, then click a known-free cell." :
+    !goalMode ? "Use clicked point as robot location to seed AMCL, then wait for a stable estimate." :
+    !selectedTargetFree ? "This target lacks the required saved-map clearance. Select the center of a wider white region." :
+    !targetMapEligible ? "Target walking needs a reviewed map or a verified map in supervised trial mode." :
+    localization.state !== "ready" ? "Wait for a stable AMCL estimate; verify its marker against the room." :
+    trialTargetTooFar ? "Supervised trial targets must be within 0.50 m of the robot. Select a closer known-free cell." :
+    nav.planner_ready !== true ? (nav.reason || "Wait for fresh transforms, costmaps, and obstacle observations.") :
+    !previewRoute ? "Preview the route before sending the target." :
+    !controlLease ? "Click Control this session to acquire a control lease." :
+    !nav.goal_requests_enabled ? "Enable planner goal requests, then send the target." :
+    "Target request is ready; physical motion still needs supervised arming.");
+  const mapOnlyStep = selectedGoal && goalMode && loadedPixels && loadedMetadata && !canPreviewWithNav2;
+  goalReadinessStatus.textContent = mapOnlyStep ?
+    `Next step: ${mapOnlyRoute ? "Saved-map straight line checked; wait for live Nav2 checks" :
+      "Click Check saved-map line to inspect the selected target"}. This is not a Nav2 route. Goal submission is blocked: ${goalReason}` :
+    `Next step: ${goalReason}`;
+  for (const button of [setInitialPoseButton, globalLocalizationButton, controlLeaseButton,
+    previewPathButton, plannerOptInButton, sendGoalButton, armMotionButton]) {
+    if (button.disabled) button.title = goalReason;
+    else button.removeAttribute("title");
+  }
+  if (Date.now() < goalFeedbackHoldUntil) return;
+  if (loadedMapName && loadedMapName !== savedMapPreset.value) {
+    goalActionStatus.textContent =
+      `The displayed map (${loadedMapName}) differs from the selected robot map (${savedMapPreset.value}). Load the selected map before setting a pose or goal.`;
+  } else if (!navStack.process_running) {
+    goalActionStatus.textContent = "Start localization / Nav2 with the selected saved map before setting a pose or goal.";
+  } else if (localization.state !== "ready") {
+    goalActionStatus.textContent =
+      `${localization.reason || "AMCL has not established a stable pose."} ` +
+      "Check the saved map against the room. If you know the robot's actual position, choose “Robot starting pose” under “Map click selects”, click that position, and set its heading. Goal requests remain disabled until localization stabilizes.";
+  } else {
+    goalActionStatus.textContent = nav.reason ||
+      "Planner action is disabled by default. The velocity gate has no robot output connection.";
+  }
+  if (previewRoute && !goalPending && ["idle", "stopped", "rejected", "succeeded", "canceled", "aborted"].includes(nav.active_goal_state)) {
+    goalActionStatus.textContent = "Route preview ready. Review the displayed route; submitting still requires planner opt-in and session control.";
+  } else if (nav.active_goal_state === "stopped" && nav.stop_latched !== true) {
+    goalActionStatus.textContent = "No active goal in this localization session. Select a target and use the Next step guidance.";
+  } else if (nav.active_goal_detail && nav.active_goal_state !== "idle") {
+    if (status?.simulation && nav.active_goal_state === "succeeded") {
+      goalActionStatus.textContent = "Simulation: virtual target reached. No robot moved.";
+    } else if (["succeeded", "finished_4"].includes(nav.active_goal_state)) {
       goalActionStatus.textContent =
-        "Nav2 reports SUCCEEDED (status 4). The planner action completed; motor output remains isolated.";
+        "Nav2 reports SUCCEEDED (status 4). Check the robot's physical position before confirming arrival.";
     } else {
       goalActionStatus.textContent = nav.active_goal_detail;
     }
@@ -210,26 +378,42 @@ function updateControls(status) {
 }
 
 async function refreshMapCatalog() {
-  if (refreshingMapCatalog) return;
-  refreshingMapCatalog = true;
-  try {
-    const response = await fetch("/api/v1/maps", { cache: "no-store" });
-    if (!response.ok) return;
-    const result = await response.json();
-    robotMapNames = new Set((result.maps || []).map((map) => map.name).filter((name) => typeof name === "string"));
-    for (const map of result.maps || []) {
-      if (typeof map.name !== "string" || typeof map.image_url !== "string" || typeof map.yaml_url !== "string") continue;
-      mapCatalog.set(map.name, { image_url: map.image_url, yaml_url: map.yaml_url });
-      if (![...savedMapPreset.options].some((option) => option.value === map.name)) {
-        const option = new Option(map.name, map.name);
-        savedMapPreset.insertBefore(option, savedMapPreset.options[savedMapPreset.options.length - 1]);
+  // Coalesce callers onto the active request. Save/finish actions await this
+  // function and must not resume with a half-populated map entry merely
+  // because the periodic catalogue poll was already in flight.
+  if (mapCatalogRefreshPromise) return mapCatalogRefreshPromise;
+  mapCatalogRefreshPromise = (async () => {
+    try {
+      const response = await fetch("/api/v1/maps", { cache: "no-store" });
+      if (!response.ok) return;
+      const result = await response.json();
+      robotMapNames = new Set((result.maps || []).map((map) => map.name).filter((name) => typeof name === "string"));
+      for (const map of result.maps || []) {
+        if (typeof map.name !== "string" || typeof map.image_url !== "string" || typeof map.yaml_url !== "string") continue;
+        const previous = mapCatalog.get(map.name);
+        if (loadedMapName === map.name && previous?.map_id && previous.map_id !== map.map_id) {
+          loadedMapId = null; selectedGoal = null; selectedTargetFree = false; selectedPixel = null; previewRoute = null; mapOnlyRoute = null;
+        }
+        mapCatalog.set(map.name, { ...map });
+        if (![...savedMapPreset.options].some((option) => option.value === map.name)) {
+          const option = new Option(map.name, map.name);
+          savedMapPreset.insertBefore(option, savedMapPreset.options[savedMapPreset.options.length - 1]);
+        }
       }
+      if (!robotMapNames.has(savedMapPreset.value) && savedMapPreset.value !== "custom" && result.maps?.length) {
+        savedMapPreset.value = result.maps[0].name;
+        hostedImageUrl.value = result.maps[0].image_url;
+        hostedYamlUrl.value = result.maps[0].yaml_url;
+      }
+      updateControls(latestRobotStatus);
+    } catch (_error) {
+      // A status-only gateway can still be used when its saved-map catalog is unavailable.
     }
-    updateControls(latestRobotStatus);
-  } catch (_error) {
-    // A status-only gateway can still be used when its saved-map catalog is unavailable.
+  })();
+  try {
+    return await mapCatalogRefreshPromise;
   } finally {
-    refreshingMapCatalog = false;
+    mapCatalogRefreshPromise = null;
   }
 }
 
@@ -244,6 +428,24 @@ startNavigationButton.addEventListener("click", async () => {
   } finally {
     await refreshRobotStatus();
   }
+});
+
+prepareTrialButton.addEventListener("click", async () => {
+  prepareTrialButton.disabled = true;
+  try {
+    const result = await callMappingApi("/api/v1/bridge/profile", {profile: "supervised_trial"});
+    apiActionStatus.textContent = `${result.message} Start localization/Nav2 next.`;
+  } catch (error) { apiActionStatus.textContent = error.message; }
+  await refreshRobotStatus();
+});
+
+returnMappingButton.addEventListener("click", async () => {
+  returnMappingButton.disabled = true;
+  try {
+    const result = await callMappingApi("/api/v1/bridge/profile", {profile: "telemetry"});
+    apiActionStatus.textContent = `${result.message} Mapping mode is ready; guide the robot with the RC in manual mode.`;
+  } catch (error) { apiActionStatus.textContent = error.message; }
+  await refreshRobotStatus();
 });
 
 stopNavigationButton.addEventListener("click", async () => {
@@ -277,15 +479,15 @@ async function refreshRobotStatus() {
   refreshingStatus = true;
   try {
     const response = await fetch("/api/v1/status", { cache: "no-store" });
-    if (!response.ok) throw new Error(`API returned HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`/api/v1/status returned HTTP ${response.status}; check that the robot runs the matching API`);
     const status = await response.json();
     if (!status.ok || !status.components) throw new Error("API returned an invalid status response");
     latestRobotStatus = status;
     const justConnected = !apiConnected;
     apiConnected = true;
-    connectionText.textContent = "Robot API connected · controls gated";
+    connectionText.textContent = status.simulation === true ? "Demo server connected" : "Robot API connected · controls gated";
     connectionDot.classList.add("connected");
-    robotConnectionTitle.textContent = "Robot API connected";
+    robotConnectionTitle.textContent = status.simulation === true ? "Demo server connected" : "Robot API connected";
     robotConnectionDetail.textContent = status.components.navigation?.reason ||
       "Mapping can be managed here. Autonomous navigation is not commissioned.";
     setStatusValue(cameraStatus, status.components.camera);
@@ -320,7 +522,7 @@ async function refreshRobotStatus() {
     if (justConnected) refreshMapCatalog();
     refreshLiveMap();
     if (Date.now() - lastPointCloudPoll > (cloudViewMode.value === "live" ? 500 : 1800)) refreshPointCloud();
-  } catch (_error) {
+  } catch (error) {
     apiConnected = false;
     latestRobotStatus = null;
     connectionText.textContent = shutdownRequested ? "Project API shut down" : "Robot API not connected";
@@ -328,7 +530,7 @@ async function refreshRobotStatus() {
     robotConnectionTitle.textContent = shutdownRequested ? "Shutdown prepared" : "Not connected";
     robotConnectionDetail.textContent = shutdownRequested ?
       "Project processes and web API are stopped. Close the laptop SSH tunnel, then power off the robot normally." :
-      "Open this page from the robot-hosted server. Offline map preview still works.";
+      `Status check failed: ${error instanceof Error ? error.message : String(error)}. Offline map preview still works.`;
     for (const element of [cameraStatus, odometryStatus, scanStatus, mapRobotStatus, pointCloudRobotStatus, stitchedCloudRobotStatus,
       mappingStatus, localizationStatus, navigationStackStatus, navigationStatus, transformsStatus, costmapsStatus, motionOutputStatus]) {
       element.textContent = "unknown";
@@ -346,8 +548,12 @@ async function refreshRobotStatus() {
 }
 
 async function callMappingApi(path, body) {
-  if (!browserSessionReady) throw new Error("This browser has no active robot session. Reload the page to reconnect.");
+  if (!browserSessionReady) throw new Error("This browser has no active robot session. Click Connect & check status to reconnect.");
   apiActionStatus.textContent = "Sending request…";
+  if (body !== undefined) body = {
+    session_epoch: latestRobotStatus?.components?.navigation?.session_epoch,
+    map_id: loadedMapId, lease_token: controlLease?.lease_token, ...body,
+  };
   const response = await fetch(path, {
     method: "POST",
     headers: body ? { "Content-Type": "application/json" } : {},
@@ -355,7 +561,12 @@ async function callMappingApi(path, body) {
     credentials: "same-origin",
     cache: "no-store",
   });
-  const result = await response.json();
+  const result = await response.json().catch(() => ({ok: false, error: `Robot API returned HTTP ${response.status} without JSON.`}));
+  if (response.status === 401 || response.status === 403) {
+    browserSessionReady = false;
+    updateControls(latestRobotStatus);
+    throw new Error("Browser session expired. Click Connect & check status, then retry the action.");
+  }
   if (!response.ok || !result.ok) throw new Error(result.error || `Request failed (${response.status})`);
   apiActionStatus.textContent = result.message || "Request completed.";
   await refreshRobotStatus();
@@ -369,10 +580,13 @@ async function establishBrowserSession() {
       cache: "no-store", credentials: "same-origin",
     });
     const result = await response.json();
-    if (!response.ok || !result.ok || result.authorized !== true) throw new Error("Session unavailable");
+    if (!response.ok || !result.ok || result.authorized !== true) {
+      throw new Error(result.error || `Session endpoint returned HTTP ${response.status}`);
+    }
     browserSessionReady = true;
-  } catch (_error) {
+  } catch (error) {
     browserSessionReady = false;
+    connectCheckStatus.textContent = `Browser session unavailable: ${error instanceof Error ? error.message : String(error)}. Check the robot API version or tunnel.`;
   }
   updateControls(latestRobotStatus);
   return browserSessionReady;
@@ -383,7 +597,6 @@ connectCheckButton.addEventListener("click", async () => {
   connectCheckStatus.textContent = "Creating browser session and reading current robot status…";
   const sessionReady = await establishBrowserSession();
   if (!sessionReady) {
-    connectCheckStatus.textContent = "Could not create a browser session. Check that this page is served by the robot API and reload after reconnecting.";
     connectCheckButton.disabled = false;
     return;
   }
@@ -406,26 +619,31 @@ sendGoalButton.addEventListener("click", async () => {
   try {
     const result = await callMappingApi("/api/v1/navigation/goal", {
       ...selectedGoal,
+      yaw: headingRadians(initialYaw.value),
       map_name: savedMapPreset.value,
+      map_id: loadedMapId,
+      preview_id: previewRoute && previewRoute.preview_id,
     });
-    goalActionStatus.textContent = `${result.message} Planner only; robot motor output is disconnected.`;
+    goalActionStatus.textContent = result.planner_only === false ? `${result.message} Commissioned motion still requires explicit arming.` :
+      latestRobotStatus?.components?.motion_output?.bridge_profile === "supervised_trial" ?
+      `${result.message} Arm the short supervised trial to move.` : `${result.message} Planner only; no motor permission granted.`;
   } catch (error) {
     requestError = error.message;
-    goalActionStatus.textContent = requestError;
+    showGoalFeedback(requestError);
   } finally {
     await refreshRobotStatus();
     // refreshRobotStatus normally reflects the server's active-goal detail. If
     // the API rejected this request before creating a goal, preserve the
     // actionable HTTP error instead of replacing it with "No navigation goal
     // submitted.".
-    if (requestError) goalActionStatus.textContent = requestError;
+    if (requestError) showGoalFeedback(requestError);
   }
 });
 
 plannerOptInButton.addEventListener("click", async () => {
   const nav = latestRobotStatus?.components?.navigation || {};
   const enabled = nav.goal_requests_enabled !== true;
-  if (enabled && !window.confirm(
+  if (enabled && !await confirmAction(
     "Enable Nav2 planner goal requests? This only enables explicit planner actions. " +
     "It does not connect motor output; do not use it as an emergency stop.")) return;
   plannerOptInButton.disabled = true;
@@ -434,9 +652,9 @@ plannerOptInButton.addEventListener("click", async () => {
       enabled,
       map_name: savedMapPreset.value,
     });
-    goalActionStatus.textContent = result.message;
+    showGoalFeedback(result.message);
   } catch (error) {
-    goalActionStatus.textContent = error.message;
+    showGoalFeedback(error.message);
   } finally {
     await refreshRobotStatus();
   }
@@ -447,10 +665,10 @@ globalLocalizationButton.addEventListener("click", async () => {
   try {
     const result = await callMappingApi("/api/v1/localization/global");
     globalLocalizationPending = true;
-    goalActionStatus.textContent = result.message;
+    showGoalFeedback(result.message);
     globalLocalizationStatus.textContent = result.message;
   } catch (error) {
-    goalActionStatus.textContent = error.message;
+    showGoalFeedback(error.message);
   } finally {
     await refreshRobotStatus();
   }
@@ -460,30 +678,43 @@ cancelGoalButton.addEventListener("click", async () => {
   cancelGoalButton.disabled = true;
   try {
     const result = await callMappingApi("/api/v1/navigation/cancel");
-    goalActionStatus.textContent = result.message;
+    showGoalFeedback(result.message);
   } catch (error) {
-    goalActionStatus.textContent = error.message;
+    showGoalFeedback(error.message);
   } finally {
     await refreshRobotStatus();
   }
 });
 
-mapClickMode.addEventListener("change", () => updateControls(latestRobotStatus));
+mapClickMode.addEventListener("change", () => {
+  // A pose click must never silently become a goal after changing the mode.
+  selectedGoal = null;
+  selectedTargetFree = false;
+  selectedPixel = null;
+  previewRoute = null;
+  mapOnlyRoute = null;
+  goalPreview.hidden = true;
+  updateControls(latestRobotStatus);
+  paintMap();
+});
 
 setInitialPoseButton.addEventListener("click", async () => {
   if (!selectedGoal) return;
-  const yawDegrees = Number(initialYaw.value);
-  if (!Number.isFinite(yawDegrees) || yawDegrees < -180 || yawDegrees > 180) {
-    goalActionStatus.textContent = "Heading must be between -180 and 180 degrees.";
-    return;
-  }
   setInitialPoseButton.disabled = true;
   try {
-    const pose = { ...selectedGoal, yaw: yawDegrees * Math.PI / 180 };
+    const pose = { ...selectedGoal, yaw: headingRadians(initialYaw.value) };
     const result = await callMappingApi("/api/v1/localization/initial_pose", pose);
-    goalActionStatus.textContent = result.message;
+    showGoalFeedback(result.message);
+    mapClickMode.value = "goal";
+    selectedGoal = null;
+    selectedTargetFree = false;
+    selectedPixel = null;
+    previewRoute = null;
+    mapOnlyRoute = null;
+    goalPreview.hidden = true;
+    paintMap();
   } catch (error) {
-    goalActionStatus.textContent = error.message;
+    showGoalFeedback(error.message);
   } finally {
     await refreshRobotStatus();
   }
@@ -609,6 +840,7 @@ resumeMappingButton.addEventListener("click", async () => {
 
 saveMapButton.addEventListener("click", async () => {
   saveMapButton.disabled = true;
+  mapSaveStatus.textContent = "Saving the live map on the robot…";
   try {
     const result = await callMappingApi("/api/v1/maps/save", { name: saveMapName.value.trim() });
     hostedImageUrl.value = result.image_url;
@@ -619,11 +851,17 @@ saveMapButton.addEventListener("click", async () => {
       option = new Option(name, name);
       savedMapPreset.insertBefore(option, savedMapPreset.options[savedMapPreset.options.length - 1]);
     }
-    mapCatalog.set(name, { image_url: result.image_url, yaml_url: result.yaml_url });
     savedMapPreset.value = name;
-    loadHostedMapButton.click();
+    await refreshMapCatalog();
+    // A catalogue request that started just before this save can legitimately
+    // omit the new map. The successful save response is authoritative, so
+    // restore the complete entry after awaiting that request.
+    robotMapNames.add(name);
+    mapCatalog.set(name, { ...mapCatalog.get(name), ...result });
+    updateControls(latestRobotStatus);
+    mapSaveStatus.textContent = `Saved ${name}.pgm and ${name}.yaml on the robot. Select “Load selected map” to inspect them.`;
   } catch (error) {
-    apiActionStatus.textContent = error.message;
+    mapSaveStatus.textContent = `Map was not saved: ${error.message}`;
   } finally {
     await refreshRobotStatus();
   }
@@ -635,6 +873,7 @@ saveMapName.value = `lite3_scan_${now.getFullYear()}${two(now.getMonth() + 1)}${
 establishBrowserSession().then(refreshRobotStatus);
 window.setInterval(refreshRobotStatus, 2000);
 window.setInterval(() => { if (apiConnected) refreshLiveMap(); }, 1000);
+window.setInterval(() => { if (apiConnected) refreshMapCatalog(); }, 10000);
 window.setInterval(() => {
   if (!apiConnected || refreshingPointCloud) return;
   const interval = cloudViewMode.value === "live" ? 500 : 1800;
@@ -873,102 +1112,6 @@ cloudViewMode.addEventListener("change", () => {
 });
 window.addEventListener("resize", drawPointCloud);
 
-function parseSavedPly(buffer) {
-  if (buffer.byteLength > 256 * 1024 * 1024) throw new Error("PLY exceeds the 256 MiB offline-review limit.");
-  const bytes = new Uint8Array(buffer);
-  const decoder = new TextDecoder("ascii");
-  const text = decoder.decode(bytes.subarray(0, Math.min(bytes.length, 128 * 1024)));
-  const headerMatch = /end_header\r?\n/.exec(text);
-  const headerEnd = headerMatch ? headerMatch.index + headerMatch[0].length : -1;
-  if (!text.startsWith("ply\n") && !text.startsWith("ply\r\n")) throw new Error("The saved cloud must be a PLY file.");
-  if (headerEnd <= 0) throw new Error("PLY header is incomplete or too large.");
-  const header = decoder.decode(bytes.subarray(0, headerEnd)).replace(/\r/g, "");
-  const format = header.match(/^format\s+(ascii|binary_little_endian)\s+1\.0$/m)?.[1];
-  const count = Number(header.match(/^element\s+vertex\s+(\d+)$/m)?.[1]);
-  const properties = [];
-  let inVertexElement = false;
-  for (const line of header.split("\n")) {
-    if (line.startsWith("element ")) { inVertexElement = line.startsWith("element vertex "); continue; }
-    const match = inVertexElement && /^property\s+(\w+)\s+(\w+)$/.exec(line);
-    if (match) properties.push({ type: match[1], name: match[2] });
-  }
-  if (!format || !Number.isInteger(count) || count < 1 || count > 2_000_000) throw new Error("PLY must have 1–2,000,000 vertices and use ASCII or little-endian binary format.");
-  const xyz = ["x", "y", "z"].map((name) => properties.findIndex((property) => property.name === name));
-  if (xyz.some((index) => index < 0)) throw new Error("PLY vertex properties must include x, y, and z.");
-  const values = [];
-  if (format === "ascii") {
-    const rows = decoder.decode(bytes.subarray(headerEnd)).trim().split(/\r?\n/);
-    if (rows.length < count) throw new Error("PLY vertex data is incomplete.");
-    for (let row = 0; row < count; row += 1) {
-      const fields = rows[row].trim().split(/\s+/);
-      const point = xyz.map((index) => Number(fields[index]));
-      if (point.every(Number.isFinite)) values.push(...point);
-    }
-  } else {
-    const sizeByType = { char: 1, uchar: 1, short: 2, ushort: 2, int: 4, uint: 4, float: 4, double: 8 };
-    const stride = properties.reduce((total, property) => total + (sizeByType[property.type] || 0), 0);
-    if (!stride || headerEnd + count * stride > bytes.length) throw new Error("Unsupported or incomplete binary PLY vertex data.");
-    const view = new DataView(buffer, headerEnd);
-    const read = (offset, type) => ({ float: view.getFloat32, double: view.getFloat64, char: view.getInt8, uchar: view.getUint8, short: view.getInt16, ushort: view.getUint16, int: view.getInt32, uint: view.getUint32 }[type].call(view, offset, true));
-    for (let row = 0; row < count; row += 1) {
-      let offset = row * stride;
-      const point = [];
-      for (let index = 0; index < properties.length; index += 1) {
-        const property = properties[index];
-        const value = read(offset, property.type);
-        if (xyz.includes(index)) point[xyz.indexOf(index)] = value;
-        offset += sizeByType[property.type];
-      }
-      if (point.every(Number.isFinite)) values.push(...point);
-    }
-  }
-  if (!values.length) throw new Error("PLY contains no finite XYZ vertices.");
-  const stride = Math.max(1, Math.ceil(values.length / 3 / 150_000));
-  return new Float32Array(values.filter((_, index) => Math.floor(index / 3) % stride === 0));
-}
-
-function drawSavedCloud() {
-  if (!savedCloudPoints) return;
-  const rect = savedCloudCanvas.getBoundingClientRect();
-  const width = Math.max(1, Math.round(rect.width * devicePixelRatio));
-  const height = Math.max(1, Math.round(rect.height * devicePixelRatio));
-  if (savedCloudCanvas.width !== width || savedCloudCanvas.height !== height) { savedCloudCanvas.width = width; savedCloudCanvas.height = height; }
-  savedCloudContext.fillStyle = "#07101b"; savedCloudContext.fillRect(0, 0, width, height);
-  const points = savedCloudPoints; let cx = 0; let cy = 0; let cz = 0;
-  for (let i = 0; i < points.length; i += 3) { cx += points[i]; cy += points[i + 1]; cz += points[i + 2]; }
-  const count = points.length / 3; cx /= count; cy /= count; cz /= count;
-  let radius = 0.5; for (let i = 0; i < points.length; i += 3) radius = Math.max(radius, Math.hypot(points[i] - cx, points[i + 1] - cy, points[i + 2] - cz));
-  const cosA = Math.cos(savedCloudAzimuth), sinA = Math.sin(savedCloudAzimuth), cosE = Math.cos(savedCloudElevation), sinE = Math.sin(savedCloudElevation);
-  const scale = Math.min(width, height) * 0.42 * savedCloudZoom / radius;
-  const drawn = [];
-  for (let i = 0; i < points.length; i += 3) {
-    const x = points[i] - cx, y = points[i + 1] - cy, z = points[i + 2] - cz;
-    const rx = cosA * x - sinA * y, ry = sinA * x + cosA * y, depth = cosE * ry + sinE * z;
-    drawn.push([depth, width / 2 + savedCloudPan[0] + rx * scale, height / 2 + savedCloudPan[1] - (cosE * z - sinE * ry) * scale, z]);
-  }
-  drawn.sort((a, b) => b[0] - a[0]);
-  for (const [depth, x, y, z] of drawn) { const shade = Math.max(80, Math.min(220, 155 + z * 28 - depth * 9)); savedCloudContext.fillStyle = `rgb(${Math.round(shade * .55)},${Math.round(shade)},${Math.round(shade * .85)})`; savedCloudContext.fillRect(x, y, 2 * devicePixelRatio, 2 * devicePixelRatio); }
-}
-
-savedCloudInput.addEventListener("change", async () => {
-  const file = savedCloudInput.files[0]; if (!file) return;
-  try {
-    savedCloudState.textContent = "LOADING CLOUD";
-    savedCloudPoints = parseSavedPly(await file.arrayBuffer());
-    savedCloudCanvas.hidden = false; savedCloudEmpty.hidden = true; savedCloudReset.disabled = false;
-    savedCloudState.textContent = "3D REVIEW ONLY";
-    savedCloudMeta.textContent = `${file.name} · ${(savedCloudPoints.length / 3).toLocaleString()} displayed vertices · map frame required`;
-    drawSavedCloud();
-  } catch (error) { savedCloudPoints = null; savedCloudCanvas.hidden = true; savedCloudEmpty.hidden = false; savedCloudState.textContent = "CLOUD NOT LOADED"; savedCloudMeta.textContent = error instanceof Error ? error.message : "Could not read the PLY cloud."; }
-});
-savedCloudReset.addEventListener("click", () => { savedCloudAzimuth = .8; savedCloudElevation = .55; savedCloudZoom = 1; savedCloudPan = [0, 0]; drawSavedCloud(); });
-savedCloudCanvas.addEventListener("pointerdown", (event) => { savedCloudDrag = { x: event.clientX, y: event.clientY, pan: event.shiftKey || event.button === 1 }; savedCloudCanvas.setPointerCapture(event.pointerId); });
-savedCloudCanvas.addEventListener("pointermove", (event) => { if (!savedCloudDrag) return; const dx = event.clientX - savedCloudDrag.x, dy = event.clientY - savedCloudDrag.y; if (savedCloudDrag.pan) { savedCloudPan[0] += dx * devicePixelRatio; savedCloudPan[1] += dy * devicePixelRatio; } else { savedCloudAzimuth += dx * .008; savedCloudElevation = Math.max(-1.35, Math.min(1.35, savedCloudElevation + dy * .008)); } savedCloudDrag.x = event.clientX; savedCloudDrag.y = event.clientY; drawSavedCloud(); });
-savedCloudCanvas.addEventListener("pointerup", () => { savedCloudDrag = null; });
-savedCloudCanvas.addEventListener("pointercancel", () => { savedCloudDrag = null; });
-savedCloudCanvas.addEventListener("wheel", (event) => { event.preventDefault(); savedCloudZoom = Math.max(.35, Math.min(5, savedCloudZoom * (event.deltaY < 0 ? 1.12 : .89))); drawSavedCloud(); }, { passive: false });
-window.addEventListener("resize", drawSavedCloud);
-
 const MAX_PIXELS = 16_000_000;
 let loadedPixels = null;
 let loadedMetadata = null;
@@ -1172,9 +1315,11 @@ loadButton.addEventListener("click", async () => {
 function updateMapDisplay(imageName, pixels, metadata, source) {
   loadedPixels = pixels;
   loadedMetadata = metadata;
+  loadedMapId = null; previewRoute = null; mapOnlyRoute = null;
   loadedMapName = imageName.replace(/\.(pgm|png)$/i, "");
   selectedPixel = null;
   selectedGoal = null;
+  selectedTargetFree = false;
   goalPreview.hidden = true;
   mapCanvas.width = pixels.width;
   mapCanvas.height = pixels.height;
@@ -1200,7 +1345,7 @@ function updateMapDisplay(imageName, pixels, metadata, source) {
   const percent = (value) => `${(100 * value / total).toFixed(1)}%`;
   mapCellCounts.textContent = `Free ${percent(free)} · occupied ${percent(occupied)} · unknown ${percent(unknown)} (YAML thresholds)`;
   mapQualityNote.textContent = unknown / total > 0.4
-    ? "Coverage is too sparse for reliable localization: rebuild this map with one slow, closed manual loop before using it for navigation."
+    ? "Large parts of this map are unknown. You can still select a target in known-free space and inspect a saved-map line; robot motion needs live Nav2 checks."
     : "Cell proportions only. Check wall continuity, alignment, and pose before considering navigation.";
   mapQuality.hidden = false;
 }
@@ -1220,6 +1365,13 @@ async function loadMapFiles(imageFile, yamlFile, isHosted) {
     loadedPixels = null;
     loadedMetadata = null;
     loadedMapName = null;
+    loadedMapId = null;
+    selectedGoal = null;
+    selectedTargetFree = false;
+    selectedPixel = null;
+    previewRoute = null;
+    mapOnlyRoute = null;
+    goalPreview.hidden = true;
     mapCanvas.hidden = true;
     emptyMap.hidden = false;
     mapQuality.hidden = true;
@@ -1229,6 +1381,7 @@ async function loadMapFiles(imageFile, yamlFile, isHosted) {
     mapSize.textContent = "— m × — m";
   } finally {
     button.disabled = false;
+    updateControls(latestRobotStatus);
   }
 }
 
@@ -1244,6 +1397,17 @@ loadHostedMapButton.addEventListener("click", async () => {
   loadHostedMapButton.disabled = true;
   mapState.textContent = "LOADING MAP";
   try {
+    const robotMap = mapCatalog.get(savedMapPreset.value);
+    if (robotMap?.map_id) {
+      const response = await fetch(`/api/v1/maps/bundle?name=${encodeURIComponent(savedMapPreset.value)}&map_id=${encodeURIComponent(robotMap.map_id)}`, { cache: "no-store" });
+      const bundle = await response.json();
+      if (!response.ok || !bundle.ok || bundle.map_id !== robotMap.map_id) throw new Error(bundle.error || "Map identity changed");
+      const image = Uint8Array.from(atob(bundle.image_base64), (character) => character.charCodeAt(0));
+      await loadMapFiles(new File([image], `${bundle.name}.pgm`), new File([bundle.yaml_text], `${bundle.name}.yaml`), true);
+      if (loadedPixels) loadedMapId = bundle.map_id;
+      updateControls(latestRobotStatus);
+      return;
+    }
     const imageUrl = hostedPath(hostedImageUrl.value, "Map image URL");
     const yamlUrl = hostedPath(hostedYamlUrl.value, "Map YAML URL");
     const [imageResponse, yamlResponse] = await Promise.all([
@@ -1260,6 +1424,13 @@ loadHostedMapButton.addEventListener("click", async () => {
     loadedPixels = null;
     loadedMetadata = null;
     loadedMapName = null;
+    loadedMapId = null;
+    selectedGoal = null;
+    selectedTargetFree = false;
+    selectedPixel = null;
+    previewRoute = null;
+    mapOnlyRoute = null;
+    goalPreview.hidden = true;
     mapCanvas.hidden = true;
     emptyMap.hidden = false;
     mapQuality.hidden = true;
@@ -1268,8 +1439,93 @@ loadHostedMapButton.addEventListener("click", async () => {
     mapMeta.textContent = error instanceof Error ? error.message : "Could not load the hosted map.";
     mapSize.textContent = "— m × — m";
     loadHostedMapButton.disabled = false;
+    updateControls(latestRobotStatus);
   }
 });
+
+function headingRadians(value) {
+  const degrees = Number(value);
+  if (String(value).trim() === "" || !Number.isFinite(degrees) || degrees < -180 || degrees > 180) {
+    throw new Error("Enter a heading from -180 to 180 degrees.");
+  }
+  return degrees * Math.PI / 180;
+}
+
+function updateGoalCoordinates() {
+  if (!selectedGoal) return;
+  const coordinates = `x: ${selectedGoal.x.toFixed(3)} m, y: ${selectedGoal.y.toFixed(3)} m`;
+  try {
+    const degrees = headingRadians(initialYaw.value) * 180 / Math.PI;
+    goalCoordinates.textContent = `${coordinates} · heading: ${degrees.toFixed(0)}°`;
+  } catch (error) {
+    goalCoordinates.textContent = `${coordinates} · ${error.message}`;
+  }
+}
+
+initialYaw.addEventListener("input", () => {
+  previewRoute = null;
+  updateGoalCoordinates();
+  updateControls(latestRobotStatus);
+  paintMap();
+});
+
+function pixelToMap(pixelX, pixelY, height, metadata) {
+  const localX = (pixelX + 0.5) * metadata.resolution;
+  const localY = (height - pixelY - 0.5) * metadata.resolution;
+  const cosine = Math.cos(metadata.yaw), sine = Math.sin(metadata.yaw);
+  return {
+    x: metadata.originX + cosine * localX - sine * localY,
+    y: metadata.originY + sine * localX + cosine * localY,
+  };
+}
+
+function mapToPixel(worldX, worldY, height, metadata) {
+  const dx = worldX - metadata.originX, dy = worldY - metadata.originY;
+  const cosine = Math.cos(metadata.yaw), sine = Math.sin(metadata.yaw);
+  return {
+    x: (cosine * dx + sine * dy) / metadata.resolution - 0.5,
+    y: height - (-sine * dx + cosine * dy) / metadata.resolution - 0.5,
+  };
+}
+
+function knownFreeWithClearance(worldX, worldY, clearanceMeters = 0.30) {
+  const pixel = mapToPixel(worldX, worldY, loadedPixels.height, loadedMetadata);
+  const cx = Math.round(pixel.x), cy = Math.round(pixel.y);
+  const radius = Math.ceil(clearanceMeters / loadedMetadata.resolution);
+  for (let dy = -radius; dy <= radius; dy += 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      if (dx * dx + dy * dy > radius * radius) continue;
+      const x = cx + dx, y = cy + dy;
+      if (x < 0 || y < 0 || x >= loadedPixels.width || y >= loadedPixels.height) return false;
+      const index = (y * loadedPixels.width + x) * 4;
+      const gray = (loadedPixels.data[index] + loadedPixels.data[index + 1] +
+                    loadedPixels.data[index + 2]) / 3;
+      const occupancy = loadedMetadata.negate ? gray / 255 : (255 - gray) / 255;
+      if (!(occupancy < loadedMetadata.freeThreshold)) return false;
+    }
+  }
+  return true;
+}
+
+function inspectSavedMapLine() {
+  mapOnlyRoute = null;
+  previewRoute = null;
+  const pose = latestRobotStatus?.components?.localization?.pose;
+  if (!pose || !Number.isFinite(pose.x) || !Number.isFinite(pose.y)) {
+    return "Target selected. A robot pose is needed to draw a saved-map line; this does not block selecting the target.";
+  }
+  const distance = Math.hypot(selectedGoal.x - pose.x, selectedGoal.y - pose.y);
+  const steps = Math.max(1, Math.ceil(distance / (loadedMetadata.resolution / 2)));
+  for (let index = 0; index <= steps; index += 1) {
+    const fraction = index / steps;
+    if (!knownFreeWithClearance(pose.x + (selectedGoal.x - pose.x) * fraction,
+                                pose.y + (selectedGoal.y - pose.y) * fraction)) {
+      return "Target selected. The direct line crosses unknown/occupied map cells or lacks 0.30 m clearance. Nav2 may find another route when live checks recover.";
+    }
+  }
+  mapOnlyRoute = {start: [pose.x, pose.y], points: [[pose.x, pose.y], [selectedGoal.x, selectedGoal.y]]};
+  return `Target selected. Dashed line is clear on the saved map (${distance.toFixed(2)} m); it is not a Nav2 route or permission to move.`;
+}
 
 function paintMap() {
   if (!loadedPixels) return;
@@ -1295,16 +1551,34 @@ function paintMap() {
     }
     mapContext.restore();
   }
+  if (previewRoute?.map_id === loadedMapId && previewRoute?.points?.length) {
+    mapContext.save(); mapContext.strokeStyle = "#ffcc66"; mapContext.lineWidth = 2;
+    mapContext.beginPath();
+    previewRoute.points.forEach((point, index) => {
+      const pixel = mapToPixel(point[0], point[1], loadedPixels.height, loadedMetadata);
+      if (index === 0) mapContext.moveTo(pixel.x+0.5, pixel.y+0.5);
+      else mapContext.lineTo(pixel.x+0.5, pixel.y+0.5);
+    });
+    mapContext.stroke(); mapContext.restore();
+  }
+  if (mapOnlyRoute?.points?.length) {
+    mapContext.save();
+    mapContext.strokeStyle = "#ffcc66";
+    mapContext.lineWidth = 2;
+    mapContext.setLineDash([4, 3]);
+    mapContext.beginPath();
+    mapOnlyRoute.points.forEach((point, index) => {
+      const pixel = mapToPixel(point[0], point[1], loadedPixels.height, loadedMetadata);
+      if (index === 0) mapContext.moveTo(pixel.x + 0.5, pixel.y + 0.5);
+      else mapContext.lineTo(pixel.x + 0.5, pixel.y + 0.5);
+    });
+    mapContext.stroke();
+    mapContext.restore();
+  }
   const pose = latestRobotStatus?.components?.localization?.pose;
   if (pose && loadedMetadata) {
-    const dx = pose.x - loadedMetadata.originX;
-    const dy = pose.y - loadedMetadata.originY;
-    const cosine = Math.cos(loadedMetadata.yaw);
-    const sine = Math.sin(loadedMetadata.yaw);
-    const localX = cosine * dx + sine * dy;
-    const localY = -sine * dx + cosine * dy;
-    const robotX = localX / loadedMetadata.resolution - 0.5;
-    const robotY = loadedPixels.height - localY / loadedMetadata.resolution - 0.5;
+    const robotPixel = mapToPixel(pose.x, pose.y, loadedPixels.height, loadedMetadata);
+    const robotX = robotPixel.x, robotY = robotPixel.y;
     const heading = pose.yaw - loadedMetadata.yaw;
     const size = Math.max(5, Math.min(16, Math.min(mapCanvas.width, mapCanvas.height) * 0.018));
     mapContext.save();
@@ -1326,8 +1600,9 @@ function paintMap() {
     mapContext.restore();
     const headingDegrees = ((heading * 180 / Math.PI % 360) + 360) % 360;
     mapPositionStatus.textContent = verified ?
-      `Robot position: verified AMCL pose · x ${pose.x.toFixed(2)} m · y ${pose.y.toFixed(2)} m · heading ${headingDegrees.toFixed(0)}°` :
-      `Robot marker is unverified: ${localization?.reason || "AMCL is not ready"}. Do not use it to choose a destination.`;
+      `Localized estimate · x ${pose.x.toFixed(2)} m · y ${pose.y.toFixed(2)} m · heading ${headingDegrees.toFixed(0)}°. Check alignment against the real robot.` :
+      `Robot marker is uncertain: ${localization?.reason || "AMCL is not ready"}. You may select a target; Nav2 goal submission waits for a verified pose and live checks.`;
+    if (latestRobotStatus?.simulation) mapPositionStatus.textContent = `Virtual robot pose · x ${pose.x.toFixed(2)} m · y ${pose.y.toFixed(2)} m · SIMULATION ONLY`;
     mapPositionStatus.className = `map-position-status ${verified ? "verified" : "unverified"}`;
   } else {
     mapPositionStatus.textContent = "Robot position is unavailable until localization reports a pose.";
@@ -1336,7 +1611,7 @@ function paintMap() {
   if (!selectedPixel) return;
 
   const radius = Math.max(3, Math.min(12, Math.min(mapCanvas.width, mapCanvas.height) * 0.008));
-  mapContext.strokeStyle = "#20d8ad";
+  mapContext.strokeStyle = selectedTargetFree ? "#20d8ad" : "#ffbf69";
   mapContext.lineWidth = Math.max(1, radius / 3);
   mapContext.beginPath();
   mapContext.arc(selectedPixel.x + 0.5, selectedPixel.y + 0.5, radius, 0, Math.PI * 2);
@@ -1359,17 +1634,150 @@ mapCanvas.addEventListener("click", (event) => {
   const pixelY = Math.max(0, Math.min(loadedPixels.height - 1,
     Math.floor((event.clientY - bounds.top) * loadedPixels.height / bounds.height)));
 
-  const localX = (pixelX + 0.5) * loadedMetadata.resolution;
-  const localY = (loadedPixels.height - pixelY - 0.5) * loadedMetadata.resolution;
-  const cosine = Math.cos(loadedMetadata.yaw);
-  const sine = Math.sin(loadedMetadata.yaw);
-  const worldX = loadedMetadata.originX + cosine * localX - sine * localY;
-  const worldY = loadedMetadata.originY + sine * localX + cosine * localY;
+  const world = pixelToMap(pixelX, pixelY, loadedPixels.height, loadedMetadata);
+  const worldX = world.x, worldY = world.y;
 
+  const offset = (pixelY * loadedPixels.width + pixelX) * 4;
+  const gray = (loadedPixels.data[offset] + loadedPixels.data[offset+1] + loadedPixels.data[offset+2]) / 3;
+  const occupancy = loadedMetadata.negate ? gray/255 : (255-gray)/255;
+  const knownFree = occupancy < loadedMetadata.freeThreshold;
+  const requiredClearance = latestRobotStatus?.components?.navigation?.goal_clearance_radius ?? 0.30;
+  const goalClearanceFree = knownFree && knownFreeWithClearance(
+    worldX, worldY, requiredClearance);
+  if (!knownFree && mapClickMode.value === "initial") {
+    showGoalFeedback("Choose a known-free map cell; occupied and unknown targets are rejected.");
+    return;
+  }
+  previewRoute = null;
+  mapOnlyRoute = null;
   selectedPixel = { x: pixelX, y: pixelY };
   selectedGoal = { x: worldX, y: worldY, yaw: 0.0 };
-  goalCoordinates.textContent = `x: ${worldX.toFixed(3)} m, y: ${worldY.toFixed(3)} m`;
+  selectedTargetFree = mapClickMode.value === "initial" ? knownFree : goalClearanceFree;
+  clickedPositionHint.textContent = mapClickMode.value === "initial" ?
+    "This is where the robot is now. Set its heading, then use this point as the robot location." :
+    goalClearanceFree ? "This target has the required saved-map clearance. Preview its route before sending it to Nav2." :
+      knownFree ? `This cell is free, but it lacks ${requiredClearance.toFixed(2)} m surrounding clearance. Click nearer the center of a wider white region.` :
+      "Target saved for inspection. This cell is unknown or occupied; Nav2 cannot drive to it.";
+  updateGoalCoordinates();
   goalPreview.hidden = false;
   updateControls(latestRobotStatus);
   paintMap();
 });
+
+
+controlLeaseButton.addEventListener("click", async () => {
+  try {
+    controlLease = await callMappingApi("/api/v1/control/acquire", {});
+    showGoalFeedback("Session control acquired. Keep this page visible; loss of its heartbeat stops autonomy.");
+  } catch (error) { controlLease = null; showGoalFeedback(error.message); }
+  await refreshRobotStatus();
+});
+previewPathButton.addEventListener("click", async () => {
+  if (!selectedGoal) return;
+  previewPathButton.disabled = true;
+  const nav = latestRobotStatus?.components?.navigation || {};
+  const mapEntry = mapCatalog.get(savedMapPreset.value);
+  const targetMapEligible = mapEntry?.integrity === "verified" &&
+    (mapEntry.approval_state === "reviewed" || nav.active_map_target_eligible === true);
+  const pose = latestRobotStatus?.components?.localization?.pose;
+  const tooFar = latestRobotStatus?.components?.motion_output?.bridge_profile === "supervised_trial" &&
+    pose && Math.hypot(selectedGoal.x - pose.x, selectedGoal.y - pose.y) > 0.50;
+  const canUseNav2 = apiConnected && browserSessionReady && selectedTargetFree && targetMapEligible && !tooFar &&
+    loadedMapId && loadedMapName === savedMapPreset.value && loadedMapId === nav.active_map_id &&
+    nav.planner_ready === true;
+  if (!canUseNav2) {
+    showGoalFeedback(inspectSavedMapLine());
+    paintMap();
+    updateControls(latestRobotStatus);
+    return;
+  }
+  try {
+    const response = await callMappingApi("/api/v1/navigation/preview", {
+      ...selectedGoal, yaw: headingRadians(initialYaw.value), map_name: savedMapPreset.value, map_id: loadedMapId,
+    });
+    mapOnlyRoute = null;
+    previewRoute = response.path_preview;
+    showGoalFeedback("Route preview ready. Review the route before submitting the goal.");
+    paintMap();
+  } catch (error) { previewRoute = null; showGoalFeedback(error.message); }
+  await refreshRobotStatus();
+});
+armMotionButton.addEventListener("click", async () => {
+  const trial = latestRobotStatus?.components?.motion_output?.bridge_profile === "supervised_trial";
+  if (!await confirmAction(trial ?
+    "Start a 10-second supervised walking trial for this map goal? Confirm the robot is standing, Auto Mode is ON, the area and route are clear, and the vendor app STOP is open and reachable. Stay beside the robot." :
+    "Arm the commissioned motor path for the active goal? Confirm the robot pose, clear route and operator stop are ready.")) return;
+  try {
+    const response = await callMappingApi(trial ? "/api/v1/motion/arm-supervised" : "/api/v1/motion/arm",
+      trial ? {auto_mode_confirmed:true, app_stop_ready:true, area_clear:true} : {});
+    showGoalFeedback(response.message);
+  }
+  catch (error) { showGoalFeedback(error.message); }
+  await refreshRobotStatus();
+});
+finishScanButton.addEventListener("click", async () => {
+  if (!await confirmAction("Hold the robot stationary. Finish this scan and save a new experimental map?")) return;
+  try {
+    const response = await callMappingApi("/api/v1/maps/finish", {name: saveMapName.value, stationary_ack: true});
+    apiActionStatus.textContent = response.message;
+    await refreshMapCatalog();
+    robotMapNames.add(response.name);
+    mapCatalog.set(response.name, { ...mapCatalog.get(response.name), ...response });
+    if (![...savedMapPreset.options].some((option) => option.value === response.name)) {
+      const option = new Option(response.name, response.name);
+      savedMapPreset.insertBefore(option, savedMapPreset.options[savedMapPreset.options.length - 1]);
+    }
+    savedMapPreset.value = response.name;
+    hostedImageUrl.value = response.image_url;
+    hostedYamlUrl.value = response.yaml_url;
+    mapSaveStatus.textContent = `Saved ${response.name}.pgm and ${response.name}.yaml on the robot. Load selected map to inspect it.`;
+    updateControls(latestRobotStatus);
+  } catch (error) { mapSaveStatus.textContent = `Map was not saved: ${error.message}`; }
+  await refreshRobotStatus();
+});
+setInterval(async () => {
+  if (!controlLease || leaseRenewing || document.hidden) return;
+  leaseRenewing = true;
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 400);
+  try {
+    const response = await fetch("/api/v1/control/heartbeat", {method: "POST", credentials: "same-origin",
+      headers: {"Content-Type": "application/json"}, signal: controller.signal,
+      body: JSON.stringify({lease_token: controlLease.lease_token, session_epoch: controlLease.session_epoch})});
+    // An HTTP rejection is authoritative. A single tunnel timeout is not:
+    // retain the token and retry on the next tick. The API's independent
+    // 0.8-second expiry still fails closed if heartbeats really cease.
+    if (!response.ok) controlLease = null;
+  } catch (_error) {
+    // Transient network/AbortController failure. Do not manufacture or
+    // extend a lease here; simply let the next visible-page tick retry it.
+  }
+  finally { clearTimeout(deadline); leaseRenewing = false; }
+}, 200);
+function releasePageControl() {
+  if (!controlLease) return;
+  controlLease = null;
+  fetch("/api/v1/safety/stop", {method:"POST",credentials:"same-origin",keepalive:true}).catch(() => {});
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) releasePageControl(); });
+window.addEventListener("pagehide", releasePageControl);
+
+
+function confirmAction(message) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("dialog");
+    if (typeof dialog.showModal !== "function") {
+      goalActionStatus.textContent = "This browser cannot show a nonblocking confirmation. Update the browser before arming.";
+      resolve(false); return;
+    }
+    dialog.className = "action-confirm";
+    const text = document.createElement("p"); text.textContent = message;
+    const cancel = document.createElement("button"); cancel.textContent = "Cancel"; cancel.type = "button";
+    const accept = document.createElement("button"); accept.textContent = "Confirm"; accept.type = "button";
+    const finish = (value) => { dialog.close(); dialog.remove(); resolve(value); };
+    cancel.addEventListener("click", () => finish(false));
+    accept.addEventListener("click", () => finish(true));
+    dialog.addEventListener("cancel", (event) => { event.preventDefault(); finish(false); });
+    dialog.append(text, cancel, accept); document.body.append(dialog); dialog.showModal();
+  });
+}

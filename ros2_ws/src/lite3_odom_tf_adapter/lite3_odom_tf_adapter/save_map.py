@@ -2,9 +2,13 @@
 """Save one retained ROS OccupancyGrid as a Nav2-compatible PGM/YAML pair."""
 
 import argparse
+import hashlib
 import math
+import os
 from pathlib import Path
+import re
 import sys
+import tempfile
 import time
 
 import rclpy
@@ -17,7 +21,7 @@ from rclpy.qos import (
     DurabilityPolicy,
 )
 
-from lite3_odom_tf_adapter.map_bundle import build_manifest, write_manifest
+from lite3_odom_tf_adapter.map_bundle import build_manifest, manifest_path, write_manifest
 
 
 class OneShotMapSubscriber(Node):
@@ -38,62 +42,7 @@ class OneShotMapSubscriber(Node):
             self.message = message
 
 
-def _quaternion_yaw(q):
-    return math.atan2(
-        2.0 * (q.w * q.z + q.x * q.y),
-        1.0 - 2.0 * (q.y * q.y + q.z * q.z),
-    )
-
-
-def save_grid(message, prefix):
-    width = int(message.info.width)
-    height = int(message.info.height)
-    if width <= 0 or height <= 0 or len(message.data) != width * height:
-        raise ValueError('OccupancyGrid dimensions do not match its cell data')
-
-    prefix = Path(prefix).expanduser()
-    prefix.parent.mkdir(parents=True, exist_ok=True)
-    image_path = prefix.with_suffix('.pgm')
-    yaml_path = prefix.with_suffix('.yaml')
-
-    free_limit = round(0.196 * 100)
-    occupied_limit = round(0.65 * 100)
-
-    def gray(value):
-        if value < 0:
-            return 205
-        if value <= free_limit:
-            return 254
-        if value >= occupied_limit:
-            return 0
-        return 205
-
-    with image_path.open('wb') as image:
-        image.write(f'P5\n{width} {height}\n255\n'.encode('ascii'))
-        for row in reversed(range(height)):
-            start = row * width
-            image.write(bytes(gray(v) for v in message.data[start:start + width]))
-
-    origin = message.info.origin
-    yaw = _quaternion_yaw(origin.orientation)
-    yaml_path.write_text(
-        f'image: {image_path.name}\n'
-        'mode: trinary\n'
-        f'resolution: {message.info.resolution:.12g}\n'
-        f'origin: [{origin.position.x:.12g}, {origin.position.y:.12g}, {yaw:.12g}]\n'
-        'negate: 0\n'
-        'occupied_thresh: 0.65\n'
-        'free_thresh: 0.196\n',
-        encoding='utf-8',
-    )
-    manifest_path = write_manifest(
-        prefix,
-        build_manifest(
-            prefix, width=width, height=height,
-            resolution=message.info.resolution,
-            origin=(origin.position.x, origin.position.y, yaw),
-            frame=message.header.frame_id or 'map'))
-    return image_path, yaml_path, manifest_path
+from lite3_odom_tf_adapter.map_persistence import save_grid
 
 
 def main(args=None):
@@ -102,8 +51,8 @@ def main(args=None):
     parser.add_argument('--timeout', type=float, default=15.0,
                         help='Seconds to wait for a retained /map (default: 15)')
     options, ros_args = parser.parse_known_args(args=args)
-    if options.timeout <= 0.0:
-        parser.error('--timeout must be positive')
+    if not math.isfinite(options.timeout) or options.timeout <= 0.0:
+        parser.error('--timeout must be finite and positive')
 
     rclpy.init(args=ros_args)
     node = OneShotMapSubscriber()

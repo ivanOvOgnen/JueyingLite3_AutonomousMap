@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Start the robot-hosted web API after boot for Wi-Fi browser access.
+# This file must retain Unix LF endings because it is copied to the robot.
 # Keep Nav2 goal requests disabled at startup. Planner testing requires a
 # separate, deliberate opt-in after the live system has been reviewed.
 set -eo pipefail
@@ -23,13 +24,5 @@ source "$workspace/install/setup.bash"
 # implementation.  This does not enable any motion output.
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 cd "$workspace"
-
-# Keep the project-owned command relay present after reboot, but always in its
-# fail-closed disabled state.  It publishes no motion unless separately
-# commissioned with the independent-stop and arbitration checks satisfied.
-if [[ -x "$workspace/scripts/start_vendor_cmd_vel_bridge.sh" ]]; then
-  "$workspace/scripts/start_vendor_cmd_vel_bridge.sh" || \
-    echo "Warning: guarded vendor command relay was not started; motion remains isolated." >&2
-fi
 
 exec ros2 run lite3_odom_tf_adapter robot_api

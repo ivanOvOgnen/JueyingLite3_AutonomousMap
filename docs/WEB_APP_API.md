@@ -1,5 +1,7 @@
 # Robot-hosted web app and mapping API
 
+> **Current supervised-trial note (2026-10-24):** The version-15 and planner-only sections below are retained as historical API checkpoints. The current local bundle adds a separately armed, time-limited supervised Nav2 relay. Target selection and a saved-map inspection can work before motion readiness; sending and arming a real goal still require current localization, both Nav2 costmaps, validated depth observations, a matching map, and an operator lease. The 18:38 depth/costmap timing repair was deployed, but a subsequent screenshot still showed those sensor checks failing. **Physical map-click movement is not viable.** See [the current step-by-step guide](STEP_BY_STEP_ROBOT_TEST_20261024.md) for the evidence needed before another attempt and the separate bounded Auto Mode movement check.
+
 ## Deployed version 15 — software STOP
 
 `POST /api/v1/safety/stop` is authenticated and serialized with other control requests. It latches goal submission off, requests `SetBool(false)` from `/autonomy/set_enabled` when available, requests cancellation for an accepted Nav2 goal, and stops the project Nav2 launch. Its response reports whether gate disable was confirmed and states this is not a physical E-stop. The latch is reset only by explicitly starting localization/Nav2 again. Version 15 is deployed, but this route has not been invoked as a live test. It cannot stop motion through vendor paths and is not a substitute for the handheld controller/hardware stop. `components.safety_stop.physical_estop_verified` is false.

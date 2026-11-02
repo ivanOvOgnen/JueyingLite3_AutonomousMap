@@ -1,5 +1,9 @@
 # Lite3 Pro Room Mapping and Navigation Prototype
 
+## Current test path — 2026-10-24
+
+Use the [step-by-step robot test guide](docs/STEP_BY_STEP_ROBOT_TEST_20261024.md) for the current Linux-laptop install, map/localization button order, bounded Auto Mode motion test, and recovery. The backed-up install command is `python3 scripts/nav2_one_shot.py` after manually joining the robot Wi-Fi. The separate attended vendor test is `python3 scripts/test_auto_mode_move.py --apply`; it does not navigate to a map target. The sensor timing revision accepts up to 1.0 second of depth acquisition delay and 0.5 seconds between valid cloud arrivals while retaining timestamp, TF, STOP, and route checks. It passed 226 local Python tests and the UI wiring check. **The 18:38 robot deployment did not make map-click movement viable:** a later screenshot still reports both costmaps and depth-obstacle timing/TF unavailable. See [current status](STATUS.md). Earlier dated checkpoints below are historical observations.
+
 ## Current live compatibility checkpoint — 2026-10-19
 
 The active robot session was checked after the combined bridge deployment. The project API and guarded vendor relay run in a clean ROS 2 Foxy Python environment; `geometry_msgs/Twist` and `nav2_msgs/NavigateToPose` both report valid type support from `/opt/ros/foxy`. The only intentional mixed environment is the C++ `ros1_bridge`, which must load ROS 1 Noetic and ROS 2 Foxy to translate `/leg_odom2` and `/cmd_vel_corrected`.

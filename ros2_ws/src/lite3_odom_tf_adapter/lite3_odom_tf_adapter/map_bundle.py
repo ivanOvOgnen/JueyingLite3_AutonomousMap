@@ -46,6 +46,7 @@ def build_manifest(prefix, *, width, height, resolution, origin, frame='map'):
                        'A live camera preview is not persistent reconstruction evidence.'),
         },
         'quality': {
+            'approval_state': 'experimental',
             'global_registration': 'unverified',
             'localization': 'unverified',
             'notes': ['Saving a map does not validate physical geometry or AMCL alignment.'],
